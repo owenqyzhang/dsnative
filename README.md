@@ -29,9 +29,9 @@ advantages of native execution:
 
 | Part | State |
 |---|---|
-| ROM reader: header, ARM9/ARM7, Nitro SDK module parameters, BLZ, autoloads, overlays, file system | done |
+| ROM reader: header, ARM9/ARM7, Nitro SDK module parameters (to SDK 5), BLZ, autoloads on both CPUs, overlays, file system | done |
 | Recompiler: ARMv5TE and ARMv4T, ARM and Thumb, to C | done; matches Unicorn's ARM946 on about 45,000 random snippets |
-| Code discovery: calls, branches, jump tables, interworking veneers, function pointers in literal pools and data | done, plus a missing-code feedback loop |
+| Code discovery: calls, branches, ARM and Thumb jump tables (GCC, CodeWarrior), interworking veneers, function pointers in literal pools and data, start-up stubs | done for the forms seen so far, plus a missing-code feedback loop |
 | Overlays sharing an address | handled: each candidate is checked against memory at run time |
 | Runtime: dispatcher, CPU modes and banked registers, interrupts, BIOS (high-level), CP15, TCM | done |
 | DS hardware: memory map, VRAM banks, DMA, timers, IPC sync and FIFOs, divider, square root, cartridge reads, SPI (power, firmware, touch), keypad | done for what homebrew uses |

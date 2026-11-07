@@ -135,13 +135,13 @@ def blz_compress(data, keep=0):
 @dataclass
 class Segment:
     """A run of bytes the game has at a RAM address: the ARM9 static image, an autoload
-    segment (ITCM, DTCM or another), an overlay or the ARM7 image."""
+    segment (ITCM, DTCM or another), a start-up stub, an overlay or the ARM7 image."""
     name: str
     cpu: int            # 9 or 7
     addr: int
     data: bytes
     bss: int = 0
-    kind: str = 'static'    # static, autoload, overlay
+    kind: str = 'static'    # static, autoload, stub, overlay
     overlay_id: int = -1
 
     @property
@@ -198,6 +198,7 @@ class Rom:
     autoloads: list = field(default_factory=list)   # list of Segment (ARM9)
     params7: ModuleParams = None
     autoloads7: list = field(default_factory=list)  # list of Segment (ARM7)
+    stubs: dict = field(default_factory=dict)       # cpu -> list of Segment: code crt0 copies and runs
     overlays9: list = field(default_factory=list)
     overlays7: list = field(default_factory=list)
     fat: list = field(default_factory=list)
@@ -249,6 +250,7 @@ class Rom:
         self.params7 = self._find_params(self.arm7)
         if self.params7 is not None:
             self.autoloads7 = self._parse_autoloads(7, self.arm7, h['arm7_ram'], self.params7)
+        self.stubs = {9: self._find_stubs(9, self.arm9, h['arm9_ram']), 7: self._find_stubs(7, self.arm7, h['arm7_ram'])}
         self._parse_fs()
         self.overlays9 = self._parse_ovt(h['ovt9_off'], h['ovt9_size'])
         self.overlays7 = self._parse_ovt(h['ovt7_off'], h['ovt7_size'])
@@ -315,6 +317,27 @@ class Rom:
                 src += size
         return out
 
+    @staticmethod
+    def _find_stubs(cpu, img, ram):
+        """Code crt0 copies to fast memory and calls before the autoloads (SDK 5: the two
+        CPUs' start-up handshake, run from ITCM and ARM7 WRAM):
+            ldr r1, =src; ldr r2, =dst; add r3, r2, #n
+            1: ldr r0, [r1], #4; str r0, [r2], #4; cmp r2, r3; blt 1b"""
+        loop = struct.pack('<4I', 0xE4910004, 0xE4820004, 0xE1520003, 0xBAFFFFFB)
+        out = []
+        i = img.find(loop)
+        while i >= 0:
+            if i % 4 == 0 and i >= 12:
+                a, b, c = struct.unpack_from('<3I', img, i - 12)
+                if (a & 0xFFFFF000) == 0xE59F1000 and (b & 0xFFFFF000) == 0xE59F2000 and (c & 0xFFFFFF00) == 0xE2823000:
+                    la, lb = i - 12 + 8 + (a & 0xFFF), i - 8 + 8 + (b & 0xFFF)
+                    if lb + 4 <= len(img):
+                        src, dst, n = u32(img, la) - ram, u32(img, lb), c & 0xFF
+                        if n % 4 == 0 and 0 <= src and src + n <= len(img):
+                            out.append(Segment(f'stub{len(out)}@{dst:08x}', cpu, dst, img[src:src + n], 0, 'stub'))
+            i = img.find(loop, i + 1)
+        return out
+
     def _parse_fs(self):
         h = self.header
         d = self.data
@@ -379,7 +402,7 @@ class Rom:
             static = self.arm7
             if self.params7 is not None and self.params7.autoload_start:
                 static = static[:self.params7.autoload_start - h['arm7_ram']]
-            segs = [Segment('arm7', 7, h['arm7_ram'], static)] + self.autoloads7
+            segs = [Segment('arm7', 7, h['arm7_ram'], static)] + self.autoloads7 + self.stubs.get(7, [])
             if overlays:
                 for ov in self.overlays7:
                     segs.append(Segment(f'ov7_{ov.id:03d}', 7, ov.ram_addr, self.overlay_image(ov), ov.bss_size, 'overlay', ov.id))
@@ -389,7 +412,7 @@ class Rom:
             # The autoload data is copied away at start-up; the static image proper ends there.
             static = static[:self.params.autoload_start - h['arm9_ram']]
         segs = [Segment('arm9', 9, h['arm9_ram'], static)]
-        segs += self.autoloads
+        segs += self.autoloads + self.stubs.get(9, [])
         if overlays:
             for ov in self.overlays9:
                 segs.append(Segment(f'ov9_{ov.id:03d}', 9, ov.ram_addr, self.overlay_image(ov), ov.bss_size, 'overlay', ov.id))

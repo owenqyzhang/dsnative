@@ -28,7 +28,17 @@ Code is found by walking it from the entry points:
   (a table of addresses), bounded by the `cmp rN, #n` just before; and GCC 15's form, where
   `ldrb rN, [rT, rI]` (or `ldrh` of a doubled index) reads the case's offset in words from a
   table in rodata just before the `add pc`, bounded by `cmp rI, #n`. A `cmp` only bounds a
-  table when nothing between it and the jump writes the register.
+  table when nothing between it and the jump writes the register. An `add pc, pc, rN, lsl #2`
+  nothing bounds lands somewhere in what follows: in a run of branches (a table), or in
+  straight-line code (an unrolled loop entered part way, as the SDK's division does), where
+  every instruction to the end of the run becomes a label.
+- **Thumb switches** (CodeWarrior): `adds r, s, s; add r, pc; ldrh r, [r, #k]; lsls; asrs;
+  add pc, r`, a table of signed halfword offsets after the `add pc`, bounded by `cmp s, #n`
+  and a `bhi`/`bcs` just before, or a `bls`/`bcc` over a `b default`. The whole pattern is
+  read from memory, so it doesn't matter which walk reaches the `add pc`.
+- **Saved contexts**: an ARM `adr rN, x` makes `x - 4` a label when it is code. The Nitro OS
+  saves a thread's resume point that way (`OS_SaveContext` stores its own `bx lr` + 4) and
+  resumes it with `subs pc, lr, #4`.
 - **Interworking veneers**: Thumb `bx pc` jumps to the ARM code 4 bytes on.
 - **Pointer candidates**: every literal-pool word and every data word that points into a code
   segment is a candidate entry. It is taken only when the code there looks like the start of
@@ -45,10 +55,17 @@ Code is found by walking it from the entry points:
   appends the address to `missing.txt`. `--extra missing.txt` adds it to the next build. The
   game profile (planned) keeps such entries per game.
 
-Segments are the ARM9 static image, each autoload segment at its destination (ITCM, DTCM, other
-RAM), each overlay at its load address, and the ARM7 image. A call, branch or pointer to an
-address in its own segment stays in it: an overlay is loaded while its own code runs. One into
-an address that only other overlays cover becomes an entry in each of them.
+Segments are the ARM9 and ARM7 static images, each autoload segment at its destination (ITCM,
+DTCM, ARM7 WRAM, other RAM; SDK 5 lists them in four-word entries), each start-up stub at the
+address crt0 copies it to, and each overlay at its load address. A call, branch or pointer to
+an address in its own segment stays in it: an overlay is loaded while its own code runs. One
+into an address several segments share becomes an entry in each of them, and code at such
+an address is checked against memory when dispatched.
+
+Start-up stubs are code crt0 copies to fast memory and calls before the autoloads overwrite
+it: in SDK 5 the two CPUs' handshake, run from ITCM and from ARM7 WRAM (the reader finds the
+`ldr r1, =src; ldr r2, =dst; add r3, r2, #n` copy loop). The ARM7's last step is a two-word
+trampoline it copies to its own stack and jumps to; nothing finds that one yet.
 
 ### Grouping and C output
 

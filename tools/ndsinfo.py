@@ -43,6 +43,9 @@ def main():
             print(f'    autoload {s.addr:#010x}  {len(s.data):#x} bytes + {s.bss:#x} bss')
         for s in rom.autoloads7:
             print(f'    ARM7 autoload {s.addr:#010x}  {len(s.data):#x} bytes + {s.bss:#x} bss')
+    for cpu in (9, 7):
+        for s in rom.stubs.get(cpu, []):
+            print(f'ARM{cpu} start-up stub copied to {s.addr:#010x} and run: {len(s.data):#x} bytes')
     else:
         print('no Nitro SDK module parameters (homebrew?)')
     for cpu, ovs in ((9, rom.overlays9), (7, rom.overlays7)):

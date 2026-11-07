@@ -656,6 +656,8 @@ def decode_thumb(addr, hw, next_hw=None, arch=5):
             if rd == 15:
                 ins.code = [f'return ({val}) & ~1u;']
                 ins.flow = 'ret'
+                if o == 0 and rs < 8:
+                    ins.extra.append(('taddpc', rs))   # add pc, rN: a Thumb switch's table
             else:
                 ins.code = [f'R[{rd}] = {val};']
             return ins

@@ -75,6 +75,7 @@ class Seg:
         self.addr = addr
         self.data = bytes(data)
         self.kind = kind
+        self.overlaps = []      # other segments sharing some of its addresses
 
     @property
     def end(self):
@@ -93,13 +94,16 @@ class Seg:
 class Program:
     def __init__(self, segments, arch=5, prefix='g9'):
         """segments: list of (name, addr, data, kind); kind 'overlay' marks code whose
-        address other code can share (checked at run time)."""
+        address other code can share, 'stub' code crt0 copies somewhere and runs. Code at
+        an address several segments share is checked against memory at run time."""
         self.segs = [Seg(i, *s) for i, s in enumerate(segments)]
+        for a in self.segs:
+            a.overlaps = [b for b in self.segs if b is not a and a.addr < b.end and b.addr < a.end]
         self.arch = arch
         self.prefix = prefix
         self.insns = {}             # (seg, addr, thumb) -> Insn
         self.entries = set()        # function entries (seg, addr, thumb)
-        self.resume = set()         # labels that must exist: return sites, jump-table targets
+        self.resume = set()         # labels that must exist: return sites, jump-table targets, saved contexts
         self.extra_targets = {}     # (seg, addr, thumb) -> [(addr, thumb)] (jump tables)
         self.rejected = set()
         self.literals = set()
@@ -113,17 +117,14 @@ class Program:
     def segs_for(self, addr, from_seg=None):
         """The segments a branch to addr can land in: the caller's own segment when it
         covers addr (an overlay is loaded while its own code runs, and any overlay sharing
-        the address would have overwritten it), else the non-overlay segments, else every
-        overlay that covers it."""
-        out = []
+        the address would have overwritten it), else the one segment there, else every
+        segment that covers it (overlays, or a stub and the autoload copied over it)."""
         if from_seg is not None and from_seg.contains(addr, 2):
             return [from_seg]
-        for s in self.segs:
-            if s.kind != 'overlay' and s.contains(addr, 2) and s not in out:
-                return out + [s]
-        for s in self.segs:
-            if s.kind == 'overlay' and s.contains(addr, 2) and s not in out:
-                out.append(s)
+        out = [s for s in self.segs if s.contains(addr, 2)]
+        for s in out:
+            if s.kind != 'overlay' and not s.overlaps:
+                return [s]
         return out
 
     def decode(self, seg, addr, thumb):
@@ -183,6 +184,9 @@ class Program:
         work = deque()
         for addr, thumb in entries:
             work.extend((k, False) for k in self.add_entry(addr, thumb))
+        for s in self.segs:
+            if s.kind == 'stub':
+                work.extend((k, False) for k in self.add_entry(s.addr, False, seg=s))
         while True:
             self._walk(work)
             if not scan_data:
@@ -266,6 +270,13 @@ class Program:
                             tk = (ts.index, v & ~1, bool(v & 1))
                             self.entries.add(tk)
                             push(tk, spec)
+                if not thumb and (ins.word & 0xFFFF0000) == 0xE28F0000:
+                    # adr rN, x: an address saved for an exception-style return (subs pc, lr, #4),
+                    # as OS_SaveContext saves its own resume point + 4
+                    imm, rot = ins.word & 0xFF, ((ins.word >> 8) & 0xF) * 2
+                    v = ins.addr + 8 + (((imm >> rot) | (imm << (32 - rot))) & 0xFFFFFFFF if rot else imm)
+                    if seg.contains(v - 4, 4):
+                        self.resume.add((si, v - 4, False))
                 if ins.target is not None:
                     for ts in self.segs_for(ins.target, seg):
                         tk = (ts.index, ins.target, ins.target_thumb)
@@ -318,9 +329,12 @@ class Program:
         - the same add pc after ldrb rm, [rt, ri] (or add ri, ri, ri; ldrh rm, [rt, ri]),
           with cmp ri, #n before it and rt loaded from a literal: a table of n + 1 byte
           (or halfword) offsets at rt, each case at pc + 4 * offset (GCC 15);
-        - ldr pc, [pc, rm, lsl #2] after cmp rm, #n: a table of n + 1 addresses follows."""
+        - ldr pc, [pc, rm, lsl #2] after cmp rm, #n: a table of n + 1 addresses follows;
+        - Thumb add pc, rm (CodeWarrior's switch), see _thumb_table."""
         i = len(recent) - 1        # recent[i] is the jump
         out = []
+        if kind == 'taddpc':
+            return self._thumb_table(seg, ins.addr, rm)
         if kind == 'addpc':
             load, size, ri = recent[i - 1] if i >= 1 else None, 0, None
             if load is not None and not load.thumb and ((load.word >> 12) & 0xF) == rm:
@@ -348,7 +362,7 @@ class Program:
                 return out
         n = self._bound(recent, i, rm)
         if n is None:
-            return None
+            return self._unbounded_addpc(seg, ins) if kind == 'addpc' else None
         if kind == 'addpc':
             out = [(ins.addr + 8 + 4 * k, False) for k in range(n + 1)]
         else:
@@ -359,6 +373,67 @@ class Program:
                 v = seg.u32(base + 4 * k)
                 self.literals.add(base + 4 * k)
                 out.append((v & ~1, bool(v & 1) and self.arch >= 5))
+        return out
+
+    def _unbounded_addpc(self, seg, ins):
+        """add pc, pc, rm, lsl #2 with no cmp to bound it: every place it can land in what
+        follows. A run of branches is a table of them (CodeWarrior bounds some switches
+        before offsetting the index); straight-line code is an unrolled loop entered part
+        way (the SDK's division, a Duff's device copy), so each instruction to the end of
+        the run."""
+        out = []
+        a = ins.addr + 8
+        first = self.decode(seg, a, False)
+        if first is None:
+            return None
+        table = first.flow == 'jump' and first.cond is None
+        while len(out) < 1024:
+            nxt = self.decode(seg, a, False)
+            if nxt is None or nxt.flow == 'stop':
+                break
+            ends = nxt.cond is None and nxt.flow in ('jump', 'ret')
+            if table and not (nxt.flow == 'jump' and nxt.cond is None):
+                break
+            out.append((a, False))
+            if ends and not table:
+                break
+            a += 4
+        return out or None
+
+    def _thumb_table(self, seg, jmp, r):
+        """CodeWarrior's Thumb switch on s:
+            adds r, s, s; add r, pc; ldrh r, [r, #k]; lsls r, r, #16; asrs r, r, #16; add pc, r
+        A table of signed halfwords at the add r, pc + 4 + k, each case at the add pc + 4
+        + its entry. All of it is read from memory, whichever walk reaches the add pc, and
+        the bound is in the code just before, which may be a walk of its own:
+            cmp s, #n; bhi default (n + 1 cases) or bcs default (n), then the table code;
+            cmp s, #n; bls 1f (n + 1) or bcc 1f (n); b default; 1: the table code."""
+        start = jmp - 10
+        if not seg.contains(start, 12):
+            return None
+        dbl, adr, ld, shl, sar = (seg.u16(start + 2 * j) for j in range(5))
+        i = (dbl >> 3) & 7
+        if (dbl & 0xFE00) != 0x1800 or (dbl >> 6) & 7 != i or dbl & 7 != r \
+                or (adr, shl, sar) != (0x4478 | r, 0x0400 | (r << 3) | r, 0x1400 | (r << 3) | r) \
+                or (ld & 0xF83F) != (0x8800 | (r << 3) | r):
+            return None
+        before = [seg.u16(start - 2 * j) if seg.contains(start - 2 * j, 2) else 0xFFFF for j in (1, 2, 3)]
+        cmp = lambda hw: (hw & 0xFF00) == 0x2800 | (i << 8)     # noqa: E731
+        if (before[0] & 0xFF00) in (0xD800, 0xD200) and cmp(before[1]):
+            n = (before[1] & 0xFF) + (1 if (before[0] & 0xFF00) == 0xD800 else 0)
+        elif (before[0] & 0xF800) == 0xE000 and before[1] in (0xD900, 0xD300) and cmp(before[2]):
+            n = (before[2] & 0xFF) + (1 if before[1] == 0xD900 else 0)
+        else:
+            return None
+        base = start + 2 + 4 + ((ld >> 6) & 0x1F) * 2
+        ts = next((s for s in self.segs_for(base, seg) if s.contains(base, 2 * n)), None)
+        if ts is None:
+            return None
+        at = jmp + 4
+        out = []
+        for e in range(n):
+            off = ts.u16(base + 2 * e)
+            out.append(((at + off - (0x10000 if off & 0x8000 else 0)) & 0xFFFFFFFF, True))
         return out
 
     @staticmethod
@@ -450,6 +525,8 @@ class Program:
                     if ins is None:
                         break
                     body.add(a)
+                    if (si, a, thumb) in self.resume:
+                        labels.add(a)
                     if ins.target is not None and ins.flow == 'jump' and ins.target_thumb == thumb \
                             and self.segs[si].contains(ins.target, 2) and (si, ins.target, thumb) not in self.entries:
                         labels.add(ins.target)
@@ -501,7 +578,7 @@ class Program:
         for l in labels:
             lines.append(f'    case {h(l)}: goto L_{l:08x};')
             chk = None
-            if seg.kind == 'overlay':
+            if seg.kind == 'overlay' or any(o.contains(l) for o in seg.overlaps):
                 n = min(16, seg.end - l)
                 chk = seg.data[l - seg.addr:l - seg.addr + n]
             table.append(((l | (1 if thumb else 0)), chk, fn))

@@ -132,6 +132,28 @@ def test_halfword_offset_jump_table():
         p.extra_targets.get((0, BASE + 0x14, False))
 
 
+def test_thumb_switch():
+    """CodeWarrior's Thumb switch: a table of signed halfword offsets right after add pc."""
+    p = Program([('arm9', BASE, image({0x00: [
+        0x2802,             # cmp r0, #2
+        0xD80E,             # bhi 0x22
+        0x1800,             # adds r0, r0, r0
+        0x4478,             # add r0, pc
+        0x88C0,             # ldrh r0, [r0, #6]
+        0x0400,             # lsls r0, r0, #16
+        0x1400,             # asrs r0, r0, #16
+        0x4487,             # add pc, r0
+        0x0008, 0x000C, 0x0004,     # 0x10: the table, from 0x12
+        0x2003, 0x4770,     # 0x16: movs r0, #3; bx lr
+        0x2001, 0x4770,     # 0x1a: movs r0, #1; bx lr
+        0x2002, 0x4770,     # 0x1e: movs r0, #2; bx lr
+        0x2000, 0x4770,     # 0x22: movs r0, #0; bx lr
+    ]}), 'static')], arch=5).discover([(BASE, True)])
+    assert p.extra_targets.get((0, BASE + 0x0E, True)) == [(BASE + o, True) for o in (0x1A, 0x1E, 0x16)], \
+        p.extra_targets.get((0, BASE + 0x0E, True))
+    assert not p.warnings, p.warnings
+
+
 def test_constant_branch_target_is_code():
     """ldr r3, =f; blx r3 (crt0 calling main): f is code reached from the entry point, so
     its instruction words are not read as pointers. andeq r0, r0, #0x40 is 0x02000040."""
@@ -165,16 +187,70 @@ def test_overlay_call_stays_in_its_overlay():
     assert (2, ov + 0x10, False) not in p.entries, "overlay A's own call taken into overlay B"
 
 
-def test_overwritten_index_is_no_bound():
-    """A cmp of a register written again before the jump bounds nothing."""
+def test_saved_context_resumes():
+    """OS_SaveContext saves adr + 8 as the context's pc, and OS_LoadContext resumes it with
+    subs pc, lr, #4: on the bx lr, which must be a label."""
     p = discover(image({
-        0x00: arm(0xE3500002,           # cmp r0, #2
+        0x00: arm(0xE3A00001,           # mov r0, #1
+                  0xE8817FFF,           # stm r1, {r0-lr}
+                  0xE28F0008,           # add r0, pc, #8  (0x18)
+                  0xE581003C,           # str r0, [r1, #0x3c]
+                  0xE3A00000,           # mov r0, #0
+                  0xE12FFF1E),          # 0x14: bx lr
+    }))
+    assert BASE + 0x14 in p.build_functions()[(0, BASE, False)][1], 'the resume point is not a label'
+
+
+def test_stub_and_autoload_share_an_address():
+    """crt0 runs a stub at 0x01ff8000 before the ITCM autoload is copied there: a call there
+    can land in either, and both are checked against memory when dispatched."""
+    import tempfile
+    itcm = 0x01FF8000
+    p = Program([('arm9', BASE, arm(0xE59F200C, 0xE12FFF32,      # ldr r2, =itcm; blx r2
+                                    0xE59F2008, 0xE12FFF32,      # ldr r2, =itcm + 8; blx r2
+                                    0xE12FFF1E, itcm, itcm + 8), 'static'),
+                 ('itcm', itcm, arm(0xE3A00001, 0xE12FFF1E, 0xE3A00002, 0xE12FFF1E), 'autoload'),
+                 ('stub', itcm, arm(0xE3A00003, 0xE12FFF1E), 'stub')], arch=5).discover([(BASE, False)])
+    assert (1, itcm, False) in p.entries and (2, itcm, False) in p.entries
+    with tempfile.TemporaryDirectory() as d:
+        p.emit(d)
+        table = open(os.path.join(d, 'g9_table.c')).read()
+    assert table.count('{0x1ff8000u, 16, ') == 1 and table.count('{0x1ff8000u, 8, ') == 1, table
+    assert '{0x1ff8008u, 0, ' in table, 'code only the autoload has needs no check'
+
+
+def test_overwritten_index_is_no_bound():
+    """A cmp of a register written again before the jump bounds nothing: the table is then
+    the run of branches after it, not n + 1 entries."""
+    p = discover(image({
+        0x00: arm(0xE3500005,           # cmp r0, #5
                   0xE1A00001,           # mov r0, r1
                   0x908FF100,           # addls pc, pc, r0, lsl #2
-                  0xE12FFF1E),          # bx lr
+                  0xEA000001,           # b 0x18
+                  0xEA000001,           # 0x10: b 0x1c
+                  0xEA000001,           # b 0x20
+                  0xE12FFF1E,           # 0x18: bx lr
+                  0xE3A00001, 0xE12FFF1E,   # 0x1c: mov r0, #1; bx lr
+                  0xE3A00002, 0xE12FFF1E),  # 0x24: mov r0, #2; bx lr
     }))
-    assert (0, BASE + 0x08, False) not in p.extra_targets, p.extra_targets
-    assert any('without a bound' in w for w in p.warnings), p.warnings
+    assert p.extra_targets.get((0, BASE + 0x08, False)) == [(BASE + 0x10, False), (BASE + 0x14, False)], \
+        p.extra_targets.get((0, BASE + 0x08, False))
+
+
+def test_unrolled_loop_entry():
+    """The SDK's division enters an unrolled loop part way: add pc, pc, r2, lsl #2 with
+    nothing to bound r2. Every instruction of the run after it is a place it can land."""
+    p = discover(image({
+        0x00: arm(0xE0822082,           # add r2, r2, r2, lsl #1
+                  0xE08FF102,           # add pc, pc, r2, lsl #2
+                  0xE1A00000,           # nop
+                  0xE0B33081, 0xE0433001, 0xE0B00000,   # 0x0c: adcs r3, r1, r3, lsl #1; sublo; adcs
+                  0xE0B33081, 0xE0433001, 0xE0B00000,   # 0x18
+                  0xE12FFF1E),          # 0x24: bx lr
+    }))
+    assert p.extra_targets.get((0, BASE + 0x04, False)) == [(BASE + o, False) for o in range(0x0C, 0x28, 4)], \
+        p.extra_targets.get((0, BASE + 0x04, False))
+    assert not p.warnings, p.warnings
 
 
 def main():
