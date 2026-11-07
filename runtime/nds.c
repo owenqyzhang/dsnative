@@ -811,6 +811,7 @@ void nds_run_frame(Nds *s) {
         s->dispstat[0] &= ~2; s->dispstat[1] &= ~2;
         sound_line(s, line);
         gpu3d_line(s, line);
+        rtc_line(s, line);
     }
     s->frame++;
 }
