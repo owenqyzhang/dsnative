@@ -45,7 +45,10 @@ static const struct { char code[4]; u8 type; } known[] = {
     {"ARF", SAVE_EEPROM64K},    /* Rune Factory, hard to detect from its accesses */
 };
 
-/* Neither the table, --save-type nor a save file's size says: what the Pokemon games use. */
+/* Neither the table, --save-type nor a save file's size says: what the Pokemon games use.
+ * GBATEK tells EEPROM from FLASH in an emulator by counting the bytes sent with the same
+ * program counter after chip select; an I/O access here doesn't know the guest's, so the
+ * guess is announced instead (see ready). */
 #define SAVE_DEFAULT SAVE_FLASH512K
 
 /* ---- the save file -------------------------------------------------------------------- */
@@ -64,6 +67,7 @@ static Save *ready(Nds *s) {
     Save *sv = &s->save;
     if (sv->ready) return sv;
     sv->ready = 1;
+    sv->guessed = 0;
     char code[4] = {0};
     if (s->rom && s->rom_size >= 0x10) memcpy(code, s->rom + 0x0C, 3);
     sv->ir = code[0] == 'I';    /* GBATEK: infrared cartridges' game codes start with I */
@@ -75,6 +79,14 @@ static Save *ready(Nds *s) {
         for (int k = SAVE_EEPROM512; t < 0 && n > 0 && k < SAVE_TYPES; k++)
             if ((long)chips[k].size == n) t = k;
         sv->type = t < 0 ? SAVE_DEFAULT : t;
+        sv->guessed = t < 0;
+        if (sv->guessed) {      /* a game with another chip would send commands this one won't take */
+            char gc[5] = "????";
+            if (s->rom && s->rom_size >= 0x10)
+                for (int i = 0; i < 4; i++) { u8 b = s->rom[0x0C + i]; gc[i] = b >= 0x20 && b < 0x7F ? (char)b : '.'; }
+            fprintf(stderr, "save: game code %s is not known; assuming %s (pass --save-type TYPE, or --save with a file of the chip's size)\n",
+                    gc, chips[sv->type].name);
+        }
     }
     sv->size = chips[sv->type].size;
     sv->mem = malloc(sv->size ? sv->size : 1);

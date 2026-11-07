@@ -1,13 +1,41 @@
 /* Save memory on the AUXSPI bus (save.c): each chip type's commands driven through the I/O
  * registers as a game drives them, chip select, EXMEMCNT, the infrared prefix, the choice of
  * chip and the save file across two runs. */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
+#define access unistd_access    /* this file's access() sends a command */
+#include <unistd.h>
+#undef access
 #include "nds.h"
 
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("%s:%d: ", __func__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
+
+/* What the runtime prints to stderr between err_start and err_end (the save's own lines). */
+static int err_saved;
+static void err_start(void) {
+    fflush(stderr);
+    err_saved = dup(2);
+    int fd = open("test_save.err", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    dup2(fd, 2);
+    close(fd);
+}
+static const char *err_end(void) {
+    static char buf[1024];
+    fflush(stderr);
+    dup2(err_saved, 2);
+    close(err_saved);
+    FILE *f = fopen("test_save.err", "rb");
+    size_t n = f ? fread(buf, 1, sizeof buf - 1, f) : 0;
+    if (f) fclose(f);
+    buf[n] = 0;
+    remove("test_save.err");
+    return buf;
+}
+static int lines(const char *t) { int n = 0; for (; *t; t++) n += *t == '\n'; return n; }
 
 static Nds *machine(const char *code, const char *type, const char *path) {
     u8 *rom = calloc(1, 0x1000);
@@ -362,21 +390,29 @@ static void test_infrared(void) {
 }
 
 static void test_choice(void) {
-    struct { const char *code, *type; int want, ir; } t[] = {
-        {"DSNT", 0, SAVE_FLASH512K, 0},     /* the default */
-        {"IRDO", 0, SAVE_FLASH512K, 1},     /* White 2 */
-        {"AMCE", 0, SAVE_FLASH256K, 0},
-        {"BKIP", 0, SAVE_FLASH1M, 0},
-        {"ARFE", 0, SAVE_EEPROM64K, 0},
-        {"VAAV", 0, SAVE_FLASH8M, 0},
-        {"CPUE", 0, SAVE_FLASH512K, 0},
-        {"IREO", "eeprom64k", SAVE_EEPROM64K, 1},   /* the option beats the table */
-        {"DSNT", "none", SAVE_NONE, 0},
+    struct { const char *code, *type; int want, ir, guessed; } t[] = {
+        {"DSNT", 0, SAVE_FLASH512K, 0, 1},  /* the default */
+        {"IRDO", 0, SAVE_FLASH512K, 1, 0},  /* White 2 */
+        {"AMCE", 0, SAVE_FLASH256K, 0, 0},
+        {"BKIP", 0, SAVE_FLASH1M, 0, 0},
+        {"ARFE", 0, SAVE_EEPROM64K, 0, 0},
+        {"VAAV", 0, SAVE_FLASH8M, 0, 0},
+        {"CPUE", 0, SAVE_FLASH512K, 0, 0},
+        {"IREO", "eeprom64k", SAVE_EEPROM64K, 1, 0},    /* the option beats the table */
+        {"DSNT", "none", SAVE_NONE, 0, 0},
+        {"DSNT", "flash512k", SAVE_FLASH512K, 0, 0},    /* said, even when it is the default */
     };
     for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+        err_start();
         Nds *s = machine(t[i].code, t[i].type, 0);
         (void)status(s);
+        const char *e = err_end();
         CHECK(s->save.type == t[i].want && s->save.ir == t[i].ir, "%s %s: type %d ir %d", t[i].code, t[i].type ? t[i].type : "-", s->save.type, s->save.ir);
+        /* a guess is announced (the code and the chip it assumed); what the table, an option or a file said isn't */
+        char say[64];
+        snprintf(say, sizeof say, "save: game code %s is not known; assuming flash512k", t[i].code);
+        CHECK(s->save.guessed == t[i].guessed && (t[i].guessed ? !strncmp(e, say, strlen(say)) && lines(e) == 1 : !*e),
+              "%s %s: guessed %d, stderr \"%s\"", t[i].code, t[i].type ? t[i].type : "-", s->save.guessed, e);
     }
     static const char *names[] = {"none", "eeprom512", "eeprom8k", "eeprom64k", "eeprom128k", "flash256k", "flash512k", "flash1m", "flash8m", "fram32k"};
     Nds *s = machine("DSNT", 0, 0);
@@ -388,6 +424,45 @@ static void test_choice(void) {
     static const u8 x1[1] = {0};
     put(n, 0x0A, 3, 0, x1, 1);
     CHECK(!n->save.dirty, "no chip: dirty");
+}
+
+/* A game that isn't known, with nothing else to go by: the one line on stderr says what was assumed. */
+static void test_guess(void) {
+    /* once per chip, however many commands follow; a header byte that isn't printable shows as a dot */
+    err_start();
+    Nds *s = machine("\0\1A~", 0, 0);
+    (void)status(s); (void)status(s); cmd(s, 0x06);
+    const char *e = err_end();
+    CHECK(!strncmp(e, "save: game code ..A~ is not known; assuming flash512k (", 54) && strstr(e, "--save-type TYPE") && lines(e) == 1,
+          "guess line: \"%s\"", e);
+    CHECK(s->save.guessed && s->save.type == SAVE_FLASH512K, "guessed %d type %d", s->save.guessed, s->save.type);
+    /* the chip is on until the game is done: nothing is said at the first access of a chip set by hand */
+    err_start();
+    CHECK(nds_option(s, "--save-type", "eeprom64k"), "--save-type refused");
+    (void)status(s);
+    e = err_end();
+    CHECK(!*e && !s->save.guessed && s->save.type == SAVE_EEPROM64K, "option after a guess: \"%s\", guessed %d", e, s->save.guessed);
+    /* a save file whose size fits no chip still leaves the type to the default, with its own line too */
+    const char *path = "test_guess.sav";
+    FILE *f = fopen(path, "wb");
+    for (int i = 0; i < 1234; i++) fputc(0xFF, f);
+    fclose(f);
+    err_start();
+    s = machine("DSNT", 0, path);
+    (void)status(s);
+    e = err_end();
+    CHECK(s->save.guessed && strstr(e, "assuming flash512k") && strstr(e, "holds 1234 bytes") && lines(e) == 2, "odd file: \"%s\"", e);
+    remove(path);
+    /* a file that does fit one gives the type: no guess */
+    f = fopen(path, "wb");
+    for (int i = 0; i < 0x2000; i++) fputc(0xFF, f);
+    fclose(f);
+    err_start();
+    s = machine("DSNT", 0, path);
+    (void)status(s);
+    e = err_end();
+    CHECK(!s->save.guessed && s->save.type == SAVE_EEPROM8K && !*e, "8 KB file: guessed %d, stderr \"%s\"", s->save.guessed, e);
+    remove(path);
 }
 
 /* ---- the save file across two runs ---- */
@@ -427,7 +502,7 @@ static void test_file(void) {
     for (int i = 0; i < 0x2000; i++) fputc(i & 0xFF, f);
     fclose(f);
     s = machine("DSNT", 0, path);
-    CHECK(peek(s, 2, 0x1FFF) == 0xFF && s->save.type == SAVE_EEPROM8K, "8 KB file: type %d", s->save.type);
+    CHECK(peek(s, 2, 0x1FFF) == 0xFF && s->save.type == SAVE_EEPROM8K && !s->save.guessed, "8 KB file: type %d, guessed %d", s->save.type, s->save.guessed);
     /* a file shorter than the chip: the rest is erased, and the whole chip is written back */
     s = machine("DSNT", "eeprom64k", path);
     CHECK(peek(s, 2, 0x1FFF) == 0xFF && peek(s, 2, 0x10) == 0x10 && peek(s, 2, 0x2000) == 0xFF, "short file");
@@ -492,6 +567,7 @@ int main(void) {
     test_exmemcnt();
     test_infrared();
     test_choice();
+    test_guess();
     test_file();
     if (fails) { printf("%d checks failed\n", fails); return 1; }
     return 0;

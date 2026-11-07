@@ -15,6 +15,7 @@ typedef struct {
     /* set up at the chip's first use, once the options are in */
     int type;                   /* SAVE_*: --save-type, else the game code, the file's size, the default */
     int type_set, ready;
+    int guessed;                /* type is SAVE_DEFAULT because nothing said (a line went to stderr) */
     int ir;                     /* infrared cartridge: save commands come after a 00h prefix */
     u8 *mem; u32 size;
     char *path; int dirty;      /* --save: read at setup, written back at shutdown if changed */
