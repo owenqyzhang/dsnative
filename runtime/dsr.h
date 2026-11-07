@@ -57,7 +57,7 @@ struct Cpu {
     u32 exit_pc;                /* the dispatcher stops when it reaches this address (tests) */
     u32 stop;
     /* BIOS interrupt wait (IntrWait) */
-    u32 wait_mask, waiting;
+    u32 wait_mask, wait_ret, wait_ret_t;
     /* the machine's interrupt lines */
     int (*irq_line)(Cpu *c);    /* an enabled interrupt is requested (IME, IE & IF) */
     int (*irq_wake)(Cpu *c);    /* IE & IF: wakes a halted CPU */
@@ -176,7 +176,7 @@ u32 dsr_get_user_reg(Cpu *c, int n);
 void dsr_set_user_reg(Cpu *c, int n, u32 v);
 u32 dsr_undefined(Cpu *c, u32 pc, u32 word);
 u32 dsr_bad_entry(Cpu *c, u32 pc, u32 fn);
-int dsr_swi(Cpu *c, u32 num, u32 next);          /* BIOS call; nonzero: leave the function (wait) */
+u32 dsr_swi(Cpu *c, u32 num, u32 next);          /* BIOS call; nonzero: leave the function for that address */
 int dsr_cp15_write(Cpu *c, u32 crn, u32 crm, u32 op2, u32 v);   /* nonzero: leave (halt) */
 u32 dsr_cp15_read(Cpu *c, u32 crn, u32 crm, u32 op2);
 

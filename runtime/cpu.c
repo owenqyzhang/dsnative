@@ -190,8 +190,9 @@ static u32 isqrt(u32 v) {
     return r;
 }
 
-int dsr_swi(Cpu *c, u32 num, u32 next) {
-    (void)next;
+#define BIOS_INTRWAIT 0x300u
+
+u32 dsr_swi(Cpu *c, u32 num, u32 next) {
     c->budget -= 8;
     switch (num) {
     case 0x03:  /* WaitByLoop */
@@ -202,15 +203,16 @@ int dsr_swi(Cpu *c, u32 num, u32 next) {
         if (num == 5) { c->r[0] = 1; c->r[1] = 1; }
         if (c->r[0] & 1) wr32(c, c->irq_check_addr, rd32(c, c->irq_check_addr) & ~c->r[1]);
         c->wait_mask = c->r[1];
-        c->waiting = 1;
+        c->wait_ret = next; c->wait_ret_t = c->t;
         c->write_slow(c, 0x04000208, 1, 4);     /* the BIOS enables IME while it waits */
-        return 1;
+        c->t = 0;
+        return c->bios_base + BIOS_INTRWAIT;    /* the wait loop runs as BIOS code (bios_exec) */
     case 0x06:  /* Halt */
         c->halted = 1;
-        return 1;
+        return next;
     case 0x07:  /* Sleep (ARM7) */
         c->halted = 1;
-        return 1;
+        return next;
     case 0x09: { /* Div */
         s32 n = (s32)c->r[0], d = (s32)c->r[1];
         if (d == 0) { c->r[0] = n < 0 ? (u32)-1 : 1; c->r[1] = (u32)n; c->r[3] = 1; return 0; }
@@ -259,7 +261,7 @@ int dsr_swi(Cpu *c, u32 num, u32 next) {
         return 0;
     case 0x1F:  /* CustomHalt (ARM7) */
         c->halted = 1;
-        return 1;
+        return next;
     default:
         fprintf(stderr, "[ARM%d] BIOS call %02x is not implemented (r0=%08x r1=%08x r2=%08x)\n", c->arch == 5 ? 9 : 7, num, c->r[0], c->r[1], c->r[2]);
         return 0;
@@ -310,8 +312,22 @@ static void enter_irq(Cpu *c) {
 
 /* BIOS code, run in C: the interrupt handler and its return */
 #define BIOS_IRQ_RET 0x200u
+static int irq_pending(Cpu *c) { return !c->irq_off && c->irq_line && c->irq_line(c); }
+
 static int bios_exec(Cpu *c) {
     u32 off = c->r[15] - c->bios_base;
+    if (off == BIOS_INTRWAIT) {     /* IntrWait: until the handler has set one of the flags */
+        u32 f = rd32(c, c->irq_check_addr);
+        if (f & c->wait_mask) {
+            wr32(c, c->irq_check_addr, f & ~c->wait_mask);
+            c->r[15] = c->wait_ret; c->t = c->wait_ret_t;
+            return 1;
+        }
+        if (irq_pending(c)) return 1;       /* taken at the top of the loop; it returns here */
+        c->halted = 1;
+        c->budget = 0;
+        return 0;
+    }
     if (off == 0x18) {          /* stmfd sp!, {r0-r3, r12, lr}; ldr pc, [handler] */
         u32 sp = c->r[13] - 24;
         u32 regs[6] = {c->r[0], c->r[1], c->r[2], c->r[3], c->r[12], c->r[14]};
@@ -351,20 +367,10 @@ s32 dsr_run(Cpu *c, s32 cycles) {
             if (c->irq_wake && c->irq_wake(c)) c->halted = 0;
             else { c->budget = 0; break; }
         }
-        if (c->waiting) {
-            u32 f = rd32(c, c->irq_check_addr);
-            if (f & c->wait_mask) {
-                wr32(c, c->irq_check_addr, f & ~c->wait_mask);
-                c->waiting = 0;
-            } else if (!(c->irq_line && c->irq_line(c) && !c->irq_off)) {
-                c->budget = 0;      /* idle until an interrupt */
-                break;
-            }
-        }
-        if (!c->irq_off && c->irq_line && c->irq_line(c)) enter_irq(c);
+        if (irq_pending(c)) enter_irq(c);
         u32 pc = c->r[15];
         if (pc == c->exit_pc) { c->stop = 1; break; }
-        if (in_bios(c, pc)) { if (!bios_exec(c)) break; continue; }
+        if (in_bios(c, pc)) { if (!bios_exec(c) && !c->halted) break; continue; }
         const DispatchEntry *e = lookup(c, pc | c->t);
         if (!e) {
             c->misses++;

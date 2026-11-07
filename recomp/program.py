@@ -126,11 +126,45 @@ class Program:
             a = ins.next
         return True
 
-    def discover(self, entries):
-        """entries: list of (addr, thumb). Walks all code reachable from them."""
+    def discover(self, entries, scan_data=True):
+        """entries: list of (addr, thumb). Walks all code reachable from them, then (with
+        scan_data) takes every data word that points at plausible code as an entry too:
+        tables of function pointers and vtables live outside literal pools."""
         work = deque()
         for addr, thumb in entries:
             work.extend(self.add_entry(addr, thumb))
+        while True:
+            self._walk(work)
+            if not scan_data:
+                break
+            work.extend(self._scan_data())
+            if not work:
+                break
+        return self
+
+    def _scan_data(self):
+        covered = set()
+        for (si, a, t), ins in self.insns.items():
+            for k in range(0, ins.size, 2):
+                covered.add((si, a + k))
+        found = []
+        for seg in self.segs:
+            for off in range(0, len(seg.data) - 3, 4):
+                a = seg.addr + off
+                if (seg.index, a) in covered:
+                    continue
+                v = struct.unpack_from('<I', seg.data, off)[0]
+                if not (0x01000000 <= v < 0x04000000):
+                    continue
+                thumb = bool(v & 1)
+                t = v & ~1
+                if not thumb and t & 3:
+                    continue
+                for k in self.add_entry(t, thumb, speculative=True):
+                    found.append(k)
+        return found
+
+    def _walk(self, work):
         seen = set()
         visited = self._visited
         while work:
@@ -149,6 +183,9 @@ class Program:
                 if ins is None:
                     self.warnings.append(f'{seg.name}: code runs out of its segment at {addr:#x}')
                     break
+                if ins.flow == 'ret' and not thumb and recent and recent[-1].word == 0xE1A0E00F and recent[-1].cond is None \
+                        and recent[-1].next == ins.addr:
+                    ins.flow = 'icall'      # mov lr, pc; bx rN / ldr pc, [...]: an ARMv4 indirect call
                 recent.append(ins)
                 for lit in ins.literals:
                     self.literals.add(lit)
@@ -156,7 +193,7 @@ class Program:
                 if ins.target is not None:
                     for ts in self.segs_for(ins.target, seg):
                         tk = (ts.index, ins.target, ins.target_thumb)
-                        if ins.flow == 'call':
+                        if ins.flow == 'call' or ins.target_thumb != thumb:
                             if tk not in self.entries:
                                 self.entries.add(tk)
                             work.append(tk)
@@ -175,13 +212,12 @@ class Program:
                             tk = (si, ta, tt)
                             self.resume.add(tk)
                             work.append(tk)
-                if ins.flow == 'split':
+                if ins.flow in ('split', 'icall'):
                     self.resume.add((si, ins.next, thumb))
                 ends = ins.flow == 'stop' or (ins.cond is None and ins.flow in ('jump', 'ret'))
                 if ends:
                     break
                 addr = ins.next
-        return self
 
     def _literal_candidate(self, seg, lit, work):
         for s in self.segs_for(lit, seg):
@@ -276,7 +312,7 @@ class Program:
                         if tt == thumb and self.segs[si].contains(ta, 2) and (si, ta, thumb) not in self.entries:
                             labels.add(ta)
                             work.append(ta)
-                    if ins.flow in ('call', 'split'):
+                    if ins.flow in ('call', 'split', 'icall'):
                         labels.add(ins.next)
                     if ins.flow == 'stop' or (ins.cond is None and ins.flow in ('jump', 'ret')):
                         break

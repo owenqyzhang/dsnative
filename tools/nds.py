@@ -400,6 +400,10 @@ def build_rom(arm9, arm9_ram, arm9_entry, arm7, arm7_ram, arm7_entry, title='DSN
         nb = n.encode('latin-1')
         fnt += bytes([len(nb)]) + nb
     fnt += b'\0'
+    # Card reads below 0x8000 are redirected (secure area protection): the file system
+    # goes above it, as on real cartridges.
+    if arm9_off + len(body) < 0x8000:
+        body += b'\0' * (0x8000 - arm9_off - len(body))
     fnt_off = arm9_off + len(body)
     body += align(bytes(fnt))
     fat_off = arm9_off + len(body)

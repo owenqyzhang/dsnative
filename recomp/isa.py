@@ -12,6 +12,8 @@ Flow kinds:
   jump    static branch to `target`
   call    BL/BLX: LR set in `code`, then leaves the function to `target`
   ret     leaves the function to a computed address (`code` holds the return statement)
+  icall   an indirect call (BLX reg, or mov lr, pc before a jump): leaves like ret, and the
+          next instruction is its return site
   stop    undefined: `code` raises it
 A conditional instruction (cond set) falls through when its condition fails.
 """
@@ -450,7 +452,7 @@ def decode_arm(addr, w, arch=5):
             if arch < 5:
                 return undefined(ins, w)
             ins.code = [f'{{ u32 t = {reg(w & 0xF, addr + 8)}; R[14] = {h(addr + 4)}; return dsr_bx(c, t); }}']
-            ins.flow = 'ret'
+            ins.flow = 'icall'
             return ins
         if (w & 0x0FFF0FF0) == 0x016F0F10:      # CLZ
             if arch < 5:
@@ -543,7 +545,7 @@ def decode_arm(addr, w, arch=5):
     # top == 7
     if w & (1 << 24):
         num = (w >> 16) & 0xFF
-        ins.code = [f'if (dsr_swi(c, {num}, {h(addr + 4)})) return {h(addr + 4)};']
+        ins.code = [f'{{ u32 r_ = dsr_swi(c, {num}, {h(addr + 4)}); if (r_) return r_; }}']
         ins.flow = 'split'
         return ins
     if w & 0x10:
@@ -638,9 +640,14 @@ def decode_thumb(addr, hw, next_hw=None, arch=5):
                     if arch < 5:
                         return undefined(ins, hw)
                     ins.code = [f'{{ u32 t = {src}; R[14] = {h((addr + 2) | 1)}; return dsr_bx(c, t); }}']
+                    ins.flow = 'icall'
+                elif rs == 15:      # bx pc: the ARM code 4 bytes on (an interworking veneer)
+                    ins.flow = 'jump'
+                    ins.target = (addr + 4) & ~3
+                    ins.target_thumb = False
                 else:
                     ins.code = [f'return dsr_bx(c, {src});']
-                ins.flow = 'ret'
+                    ins.flow = 'ret'
                 return ins
             if o == 1:
                 ins.code = [f'SUBS(c, {reg(rd, pc)}, {src});']
@@ -733,7 +740,7 @@ def decode_thumb(addr, hw, next_hw=None, arch=5):
             return ins
         cond = (hw >> 8) & 0xF
         if cond == 0xF:             # format 17: SWI
-            ins.code = [f'if (dsr_swi(c, {hw & 0xFF}, {h(addr + 2)})) return {h(addr + 2)};']
+            ins.code = [f'{{ u32 r_ = dsr_swi(c, {hw & 0xFF}, {h(addr + 2)}); if (r_) return r_; }}']
             ins.flow = 'split'
             return ins
         if cond == 0xE:
