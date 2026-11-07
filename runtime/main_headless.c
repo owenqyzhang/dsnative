@@ -85,20 +85,29 @@ static u16 parse_keys(const char *s, const char *end) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: %s game.nds arm9.bin [--frames N] [--png out.png] [--keys F:KEYS,...] [--touch F:X:Y,...] [--stats]\n", argv[0]); return 2; }
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s game.nds arm9.bin [--frames N] [--png out.png] [--keys F:KEYS,...] [--touch F:X:Y,...] [--stats]\n"
+                        "       [--<subsystem option> value ...]\n", argv[0]);
+        return 2;
+    }
     int frames = 60, stats = 0;
     const char *png = 0, *keys = "", *touch = "";
+    const char *opts[64]; int nopts = 0;     /* the subsystems' options, as name, value pairs */
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--png") && i + 1 < argc) png = argv[++i];
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
         else if (!strcmp(argv[i], "--touch") && i + 1 < argc) touch = argv[++i];
         else if (!strcmp(argv[i], "--stats")) stats = 1;
+        else if (!strncmp(argv[i], "--", 2) && i + 1 < argc && nopts < 64) { opts[nopts++] = argv[i]; opts[nopts++] = argv[++i]; }
+        else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
     }
     u32 rom_len, a9_len;
     u8 *rom = read_file(argv[1], &rom_len);
     u8 *a9 = read_file(argv[2], &a9_len);
     Nds *s = nds_create(rom, rom_len);
+    for (int i = 0; i < nopts; i += 2)
+        if (!nds_option(s, opts[i], opts[i + 1])) { fprintf(stderr, "unknown option %s\n", opts[i]); return 2; }
     s->arm9.table = g9_table; s->arm9.table_len = g9_table_len;
     s->arm7.table = g7_table; s->arm7.table_len = g7_table_len;
     nds_direct_boot(s, a9, a9_len);
@@ -130,5 +139,6 @@ int main(int argc, char **argv) {
                 s->frame, (unsigned long long)s->arm9.cycles, (unsigned long long)s->arm9.dispatches, s->arm9.r[15], s->arm9.stop ? " (stopped)" : "",
                 (unsigned long long)s->arm7.cycles, (unsigned long long)s->arm7.dispatches, s->arm7.r[15], s->arm7.stop ? " (stopped)" : "");
     }
+    nds_shutdown(s);
     return (s->arm9.stop || s->arm7.stop) ? 1 : 0;
 }

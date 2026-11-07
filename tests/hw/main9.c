@@ -5,6 +5,20 @@
 
 void out_str(const char *s) { dbg(s); }
 
+/* Subsystem tests (in *_9.c), run after DONE so the timing checks above are unaffected. They
+ * print their own lines (tests/hw/expect_*.txt says what test_hw.py expects) and have about
+ * 30 frames between them. */
+void rtc_test9(void) __attribute__((weak));
+void save_test9(void) __attribute__((weak));
+void sound_test9(void) __attribute__((weak));
+void gpu3d_test9(void) __attribute__((weak));
+
+u32 arm7_command(u32 id, u32 arg) {
+    REG_IPCFIFOSEND = 0x80000000u | (id << 24) | (arg & 0xFFFFFF);
+    while (REG_IPCFIFOCNT & FIFO_RECV_EMPTY) ;
+    return REG_IPCFIFORECV;
+}
+
 volatile u32 vblanks, timer_irqs;
 
 __attribute__((target("arm"))) void irq_handler(void) {
@@ -203,5 +217,11 @@ int main(void) {
             dbg("timer "); dbg(t > 230 && t < 300 ? "ok" : "FAIL"); dbg(" "); dbg_hex(t); dbg("\n");
         }
         if (frame == 60) { dbg("sprite "); dbg_hex((u32)x); dbg(" "); dbg_hex((u32)y); dbg("\n"); dbg("DONE\n"); }
+        if (frame == 61) {
+            if (rtc_test9) rtc_test9();
+            if (save_test9) save_test9();
+            if (sound_test9) sound_test9();
+            if (gpu3d_test9) gpu3d_test9();
+        }
     }
 }

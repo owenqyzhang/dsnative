@@ -65,4 +65,7 @@ static inline void intr_wait(u32 discard, u32 flags) {
 static inline void vblank_wait(void) {
     __asm__ volatile("swi 5" ::: "r0", "r1", "r2", "r3", "r12", "lr", "memory");
 }
+/* subsystem tests: commands to the ARM7 (main7.c) are 0x80000000 | id << 24 | argument */
+enum { CMD7_RTC = 1, CMD7_SAVE = 2, CMD7_SOUND = 3, CMD7_GPU3D = 4 };
+u32 arm7_command(u32 id, u32 arg);      /* main9.c: sends one and waits for the answer */
 #endif

@@ -4,6 +4,7 @@ results; writes the screens to build/hwtest/screen.png.
 
     python3 tests/test_hw.py
 """
+import glob
 import os
 import subprocess
 import sys
@@ -21,8 +22,17 @@ def main():
     subprocess.run([sys.executable, '-m', 'recomp', rom, '-o', gen, '--build'], cwd=ROOT, check=True,
                    stdout=subprocess.DEVNULL)
     png = os.path.join(OUT, 'screen.png')
+    # Each subsystem's tests/hw/expect_<name>.txt: "args: ..." lines add headless options, the
+    # other lines (not starting with #) are debug lines expected verbatim, keyed by first word.
+    extra_args, extra_lines = [], []
+    for path in sorted(glob.glob(os.path.join(HERE, 'hw', 'expect_*.txt'))):
+        for line in open(path).read().splitlines():
+            if line.startswith('args:'):
+                extra_args += line[5:].split()
+            elif line.strip() and not line.startswith('#'):
+                extra_lines.append(line)
     res = subprocess.run([os.path.join(gen, 'dsn_headless'), rom, os.path.join(gen, 'arm9.bin'), '--frames', '100',
-                          '--png', png, '--keys', '35:E,45:ED,55:', '--stats'],
+                          '--png', png, '--keys', '35:E,45:ED,55:', '--stats', *extra_args],
                          cwd=gen, capture_output=True, text=True)
     lines = [l[len('[debug] '):] for l in res.stdout.splitlines() if l.startswith('[debug] ')]
     ref = open(os.path.join(OUT, 'host_ref.txt')).read().splitlines()
@@ -39,6 +49,8 @@ def main():
         'sprite': 'sprite 000000a0 0000006c',       # right held 20 frames, down 10: (120, 88) + (40, 20)
         'DONE': 'DONE',
     }
+    for line in extra_lines:
+        expect[line.split()[0]] = line
     for k, v in expect.items():
         if got.get(k) != v:
             failures.append(f'expected "{v}", got "{got.get(k)}"')

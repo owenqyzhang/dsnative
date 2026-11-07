@@ -2,6 +2,10 @@
 #ifndef NDS_H
 #define NDS_H
 #include "dsr.h"
+#include "rtc.h"
+#include "save.h"
+#include "sound.h"
+#include "gpu3d.h"
 
 #define SCREEN_W 256
 #define SCREEN_H 192
@@ -70,6 +74,11 @@ typedef struct Nds {
     char dbg[1024]; int dbg_len;
     void (*debug_line)(const char *s);
     u64 time;                   /* bus (ARM7) cycles since start */
+    /* subsystems in files of their own (rtc.c, save.c, sound.c, gpu3d.c) */
+    Rtc rtc;
+    Save save;
+    Sound sound;
+    Gpu3d g3d;
 } Nds;
 
 Nds *nds_create(const u8 *rom, u32 rom_size);
@@ -77,6 +86,13 @@ void nds_direct_boot(Nds *s, const u8 *arm9, u32 arm9_len);
 void nds_run_frame(Nds *s);
 void nds_remap(Nds *s);
 void nds_request_irq(Nds *s, int cpu, u32 bits);
+/* A subsystem option ("--save", "game.sav"): returns 0 when no subsystem knows the name. */
+int nds_option(Nds *s, const char *name, const char *value);
+/* Lets the subsystems write what they keep (the save file, the sound recording). */
+void nds_shutdown(Nds *s);
+/* Takes up to max_frames stereo frames (left, right) of mixed sound produced since the last
+ * call, at 32768 Hz; returns how many it wrote. */
+u32 nds_audio_take(Nds *s, s16 *out, u32 max_frames);
 
 /* gpu2d.c */
 void gpu2d_render_line(Nds *s, int engine, int line, u32 *out);

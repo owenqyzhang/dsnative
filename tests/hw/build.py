@@ -5,6 +5,7 @@ parameters with an ITCM autoload segment, as a commercial game's does.
 
     python3 tests/hw/build.py [out_dir]
 """
+import glob
 import os
 import struct
 import subprocess
@@ -28,10 +29,12 @@ def main():
     os.makedirs(out, exist_ok=True)
     src = lambda f: os.path.join(HERE, f)   # noqa: E731
     e9, e7 = os.path.join(out, 'arm9.elf'), os.path.join(out, 'arm7.elf')
+    # subsystem tests live in files of their own: *_9.c on the ARM9, *_7.c on the ARM7
+    extra9, extra7 = sorted(glob.glob(src('*_9.c'))), sorted(glob.glob(src('*_7.c')))
     run([CC, '-mcpu=arm946e-s', '-mthumb', *COMMON, '-nostartfiles', '-nostdlib', '-T', src('arm9.ld'),
-         '-o', e9, src('crt0_9.s'), src('main9.c'), src('suite.c'), src('libc.c'), '-lgcc'])
+         '-o', e9, src('crt0_9.s'), src('main9.c'), src('suite.c'), src('libc.c'), *extra9, '-lgcc'])
     run([CC, '-mcpu=arm7tdmi', '-mthumb', *COMMON, '-nostartfiles', '-nostdlib', '-T', src('arm7.ld'),
-         '-o', e7, src('crt0_7.s'), src('main7.c'), src('libc.c'), '-lgcc'])
+         '-o', e7, src('crt0_7.s'), src('main7.c'), src('libc.c'), *extra7, '-lgcc'])
     b9, b7 = os.path.join(out, 'arm9.bin'), os.path.join(out, 'arm7.bin')
     run(['arm-none-eabi-objcopy', '-O', 'binary', '-R', '.bss', e9, b9])
     run(['arm-none-eabi-objcopy', '-O', 'binary', '-R', '.bss', e7, b7])

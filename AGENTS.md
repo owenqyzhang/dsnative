@@ -13,6 +13,14 @@
     autoload lists in each SDK's layout.
   - `python3 tests/test_hw.py`: the homebrew ROM end to end (suite output against the host,
     hardware results, screens in `build/hwtest/screen.png`).
+  - `python3 tests/test_units.py`: C unit tests of the runtime (`tests/unit/test_*.c`).
+- Hardware subsystems live in files of their own: `runtime/rtc.c`, `save.c`, `sound.c`,
+  `gpu3d.c`, each with a header holding its state (a member of `Nds`). `nds.c` gives them the
+  first look at every I/O access (`<x>_io_read`/`<x>_io_write`), calls `<x>_init`, the
+  per-line hooks and `<x>_shutdown`, and passes them headless options (`<x>_option`). Their
+  homebrew tests go in `tests/hw/<x>_9.c` / `<x>_7.c` (built automatically; ARM9 hooks run
+  after `DONE`, ARM7 ones answer `arm7_command`), with the expected lines and any headless
+  options in `tests/hw/expect_<x>.txt`.
 - Where DS hardware behaves differently from Unicorn (unaligned accesses force alignment on the
   ARM9, STR of the PC stores PC+12), follow GBATEK and keep the difference out of the random
   generators, with a comment saying so.

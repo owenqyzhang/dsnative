@@ -605,12 +605,34 @@ static void io_write8(Nds *s, int cpu, u32 a, u8 v) {
 }
 
 /* ---- the slow memory path ------------------------------------------------------------- */
+/* The subsystems in files of their own get the first look at each I/O access. */
+static int sub_io_read(Nds *s, int cpu, u32 off, int size, u32 *v) {
+    return rtc_io_read(s, cpu, off, size, v) || save_io_read(s, cpu, off, size, v) ||
+           sound_io_read(s, cpu, off, size, v) || gpu3d_io_read(s, cpu, off, size, v);
+}
+
+static int sub_io_write(Nds *s, int cpu, u32 off, int size, u32 v) {
+    return rtc_io_write(s, cpu, off, size, v) || save_io_write(s, cpu, off, size, v) ||
+           sound_io_write(s, cpu, off, size, v) || gpu3d_io_write(s, cpu, off, size, v);
+}
+
+int nds_option(Nds *s, const char *name, const char *value) {
+    return rtc_option(s, name, value) || save_option(s, name, value) ||
+           sound_option(s, name, value) || gpu3d_option(s, name, value);
+}
+
+void nds_shutdown(Nds *s) {
+    rtc_shutdown(s); save_shutdown(s); sound_shutdown(s); gpu3d_shutdown(s);
+}
+
 static u32 read_slow(Cpu *c, u32 a, int size) {
     Nds *s = SYS(c);
     int cpu = CPU_OF(c);
     switch (a >> 24) {
     case 0x04: {
         u32 off = a - 0x04000000u;
+        u32 hv;
+        if (sub_io_read(s, cpu, off, size, &hv)) return hv;
         if (size == 4) return io_read32(s, cpu, off);
         if (size == 2) return io_read16(s, cpu, off);
         if (off == 0x100000 || off == 0x100010) return io_read32(s, cpu, off) & 0xFF;
@@ -629,6 +651,7 @@ static void write_slow(Cpu *c, u32 a, u32 v, int size) {
     switch (a >> 24) {
     case 0x04: {
         u32 off = a - 0x04000000u;
+        if (sub_io_write(s, cpu, off, size, v)) return;
         if (size == 4) io_write32(s, cpu, off, v);
         else if (size == 2) io_write16(s, cpu, off, (u16)v);
         else io_write8(s, cpu, off, (u8)v);
@@ -688,6 +711,7 @@ Nds *nds_create(const u8 *rom, u32 rom_size) {
     }
     s->wramcnt = 3;
     nds_remap(s);
+    rtc_init(s); save_init(s); sound_init(s); gpu3d_init(s);
     return s;
 }
 
@@ -785,6 +809,8 @@ void nds_run_frame(Nds *s) {
         if (line < 192) dma_trigger(s, 0, 2);
         run_cycles(s, 594);
         s->dispstat[0] &= ~2; s->dispstat[1] &= ~2;
+        sound_line(s, line);
+        gpu3d_line(s, line);
     }
     s->frame++;
 }
