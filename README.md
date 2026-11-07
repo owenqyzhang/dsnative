@@ -45,10 +45,11 @@ You need Python 3.10 or later with `capstone` 5, a C compiler and, for the tests
 `arm-none-eabi-gcc` and `unicorn`:
 
 ```
-pip install "capstone>=5,<6" unicorn
+pip install "capstone>=5,<6" unicorn      # Homebrew's Python wants a venv for this (PEP 668)
 sudo apt install gcc-arm-none-eabi         # or: brew install --cask gcc-arm-embedded
 
 python3 tests/difftest.py                  # the recompiler against Unicorn's ARM946
+python3 tests/test_discovery.py            # code discovery on small synthetic images
 python3 tests/test_hw.py                   # build a homebrew ROM, recompile it, run it
 ```
 
@@ -108,6 +109,7 @@ the road to commercial games, an Apple app and the 3DS.
 | `recomp/` | the recompiler (`python3 -m recomp`) |
 | `runtime/` | the C runtime: CPU and dispatcher (`cpu.c`), the DS (`nds.c`), 2D (`gpu2d.c`), headless driver |
 | `tests/difftest.py` | differential test against Unicorn |
+| `tests/test_discovery.py` | code discovery cases the test ROM only hits with some layouts |
 | `tests/test_hw.py`, `tests/hw/` | the homebrew end-to-end test |
 
 ## Acknowledgements

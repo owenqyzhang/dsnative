@@ -64,9 +64,9 @@ def main():
             prog = Program(segs, arch=arch, prefix=prefix)
             prog.discover([(h[f'arm{cpu}_entry'], False)])
             st = prog.stats()
-            thumb = sum(1 for k in prog.insns if k[2])
             print(f'ARM{cpu} code: {st["functions"]} functions, {st["instructions"]} instructions '
-                  f'({thumb} Thumb), {st["rejected_candidates"]} pointer candidates rejected, '
+                  f'({st["thumb"]} Thumb, {st["from_candidates"]} reached only from pointer candidates), '
+                  f'{st["rejected_candidates"]} pointer candidates rejected, '
                   f'{len(prog.warnings)} warnings, {time.time() - t:.1f} s')
             for w in prog.warnings[:8]:
                 print(f'    {w}')

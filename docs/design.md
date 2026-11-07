@@ -22,14 +22,25 @@ Code is found by walking it from the entry points:
 - **Branches** (B, conditional B) stay inside the function, unless their target is another
   function's entry, a different instruction set state or a different segment.
 - **Indirect calls** (BLX reg, and the ARMv4 `mov lr, pc` before `bx`/`ldr pc`) leave to a
-  computed address. The next instruction is a return site.
+  computed address. The next instruction is a return site. When the register was loaded from
+  a literal (`ldr r3, =main; blx r3`, as crt0 calls `main`), its value is a function entry.
 - **Jump tables**: `add pc, pc, rN, lsl #2` (a table of branches) and `ldr pc, [pc, rN, lsl #2]`
-  (a table of addresses), bounded by the `cmp rN, #n` just before.
+  (a table of addresses), bounded by the `cmp rN, #n` just before; and GCC 15's form, where
+  `ldrb rN, [rT, rI]` (or `ldrh` of a doubled index) reads the case's offset in words from a
+  table in rodata just before the `add pc`, bounded by `cmp rI, #n`. A `cmp` only bounds a
+  table when nothing between it and the jump writes the register.
 - **Interworking veneers**: Thumb `bx pc` jumps to the ARM code 4 bytes on.
 - **Pointer candidates**: every literal-pool word and every data word that points into a code
   segment is a candidate entry. It is taken only when the code there looks like the start of
-  a function: it decodes, starts unconditionally (ARM) and reaches a branch or return within a
-  few instructions. A false candidate costs code size, never correctness.
+  a function: it starts unconditionally (ARM) and decodes, with no undefined instruction,
+  for six instructions or up to a branch or return. A false candidate costs code size, never
+  correctness.
+- **Certain and speculative code**: code walked from the entry points is certain; code reached
+  only from candidates is speculative. Only certain code hides a word from the data scan: a
+  candidate that is really data (a string at an odd address reads as plausible Thumb code)
+  can walk on through a table of function pointers, and the table must still be scanned.
+  Certain walks run first, so they see each function from its start, with the `cmp` before
+  a jump table, before a candidate lands in the middle of it.
 - **Feedback**: when the runtime reaches an address nothing was compiled for, it stops and
   appends the address to `missing.txt`. `--extra missing.txt` adds it to the next build. The
   game profile (planned) keeps such entries per game.

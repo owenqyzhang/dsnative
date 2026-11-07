@@ -20,6 +20,54 @@ except ImportError:     # disassembly comments are optional
 from .isa import decode_arm, decode_thumb, Insn, h
 
 
+def arm_writes(w):
+    """The registers an ARM instruction can write, or None when it may write more than
+    discovery cares to model (calls, SWI, coprocessor, the miscellaneous space)."""
+    cond = w >> 28
+    if cond == 0xF:
+        return None
+    rn, rd = (w >> 16) & 0xF, (w >> 12) & 0xF
+    op = (w >> 25) & 7
+    if op == 0 and (w & 0x90) == 0x90:
+        if (w & 0x0FC000F0) == 0x00000090:          # mul, mla
+            return {rn}
+        if (w & 0x0F8000F0) == 0x00800090:          # umull, umlal, smull, smlal
+            return {rn, rd}
+        if (w & 0x0FB00FF0) == 0x01000090:          # swp, swpb
+            return {rd}
+        if (w & 0x60) == 0:
+            return None
+        out = set()
+        if w & (1 << 20):                           # ldrh, ldrsb, ldrsh
+            out.add(rd)
+        elif (w & 0x60) == 0x40:                    # ldrd
+            out |= {rd, rd + 1}
+        if not (w & (1 << 24)) or (w & (1 << 21)):
+            out.add(rn)
+        return out
+    if op in (0, 1):
+        opc = (w >> 21) & 0xF
+        if 8 <= opc <= 11:
+            # tst/teq/cmp/cmn with S; without S this is msr, mrs, bx, clz, the DSP ops
+            return set() if (w & (1 << 20)) else None
+        return {rd}
+    if op in (2, 3):
+        if op == 3 and (w & 0x10):
+            return None
+        out = {rd} if w & (1 << 20) else set()
+        if not (w & (1 << 24)) or (w & (1 << 21)):
+            out.add(rn)
+        return out
+    if op == 4:
+        out = {r for r in range(16) if w & (1 << r)} if w & (1 << 20) else set()
+        if w & (1 << 21):
+            out.add(rn)
+        return out
+    if op == 5:
+        return set() if not (w & (1 << 24)) else None   # b; bl clobbers the caller-saved registers
+    return None
+
+
 class Seg:
     def __init__(self, index, name, addr, data, kind='static'):
         self.index = index
@@ -56,7 +104,9 @@ class Program:
         self.rejected = set()
         self.literals = set()
         self.warnings = []
-        self._visited = set()
+        self._visited = set()       # instructions on walks from the entry points
+        self._spec_visited = set()  # instructions reached only from pointer candidates
+        self._unbounded = set()     # jump tables no walk found the bound of
         self._cs = None
 
     # -- segments ------------------------------------------------------------
@@ -132,7 +182,7 @@ class Program:
         tables of function pointers and vtables live outside literal pools."""
         work = deque()
         for addr, thumb in entries:
-            work.extend(self.add_entry(addr, thumb))
+            work.extend((k, False) for k in self.add_entry(addr, thumb))
         while True:
             self._walk(work)
             if not scan_data:
@@ -140,13 +190,21 @@ class Program:
             work.extend(self._scan_data())
             if not work:
                 break
+        for si, a, t in sorted(self._unbounded - self.extra_targets.keys()):
+            self.warnings.append(f'{self.segs[si].name}: jump table at {a:#x} without a bound')
+        self._unbounded.clear()
         return self
 
     def _scan_data(self):
+        """Pointer candidates in data. Only code walked from the entry points hides a word
+        from the scan: a candidate that is really data (a string at an odd address reads as
+        Thumb code) can walk on into a table of function pointers, and must not hide it."""
         covered = set()
-        for (si, a, t), ins in self.insns.items():
-            for k in range(0, ins.size, 2):
-                covered.add((si, a + k))
+        for k in self._visited:
+            ins = self.insns.get(k)
+            if ins is not None:
+                for o in range(0, ins.size, 2):
+                    covered.add((k[0], k[1] + o))
         found = []
         for seg in self.segs:
             for off in range(0, len(seg.data) - 3, 4):
@@ -161,24 +219,34 @@ class Program:
                 if not thumb and t & 3:
                     continue
                 for k in self.add_entry(t, thumb, speculative=True):
-                    found.append(k)
+                    found.append((k, True))
         return found
 
     def _walk(self, work):
+        """work: (key, speculative). A walk from a pointer candidate is speculative, and so
+        is all it reaches. Walks from the entry points go first, so they see code with its
+        own context (the cmp bounding a jump table, the mov lr, pc of a call) before any
+        candidate reaches into it; they stop only at code they covered themselves."""
+        queues = (deque(), deque())     # from the entry points, from candidates
+        push = lambda k, sp: queues[sp].append(k)     # noqa: E731
+        for k, sp in work:
+            push(k, sp)
+        work.clear()
         seen = set()
-        visited = self._visited
-        while work:
-            k = work.popleft()
-            if k in seen:
+        while queues[0] or queues[1]:
+            spec = not queues[0]
+            k = queues[spec].popleft()
+            if (k, spec) in seen:
                 continue
-            seen.add(k)
+            seen.add((k, spec))
             si, addr, thumb = k
             seg = self.segs[si]
+            mine = self._spec_visited if spec else self._visited
             recent = []
             while True:
-                if (si, addr, thumb) in visited:
+                if (si, addr, thumb) in self._visited or (si, addr, thumb) in mine:
                     break
-                visited.add((si, addr, thumb))
+                mine.add((si, addr, thumb))
                 ins = self.decode(seg, addr, thumb)
                 if ins is None:
                     self.warnings.append(f'{seg.name}: code runs out of its segment at {addr:#x}')
@@ -189,29 +257,41 @@ class Program:
                 recent.append(ins)
                 for lit in ins.literals:
                     self.literals.add(lit)
-                    self._literal_candidate(seg, lit, work)
+                    self._literal_candidate(seg, lit, push)
+                if not thumb and ins.flow in ('ret', 'icall') and (ins.word & 0x0FFFFFD0) == 0x012FFF10:
+                    # bx/blx rN after ldr rN, =f: f is code, as surely as this walk is
+                    v = self._const(recent, len(recent) - 1, ins.word & 0xF)
+                    if v is not None:
+                        for ts in self.segs_for(v & ~1, seg):
+                            tk = (ts.index, v & ~1, bool(v & 1))
+                            self.entries.add(tk)
+                            push(tk, spec)
                 if ins.target is not None:
                     for ts in self.segs_for(ins.target, seg):
                         tk = (ts.index, ins.target, ins.target_thumb)
                         if ins.flow == 'call' or ins.target_thumb != thumb:
                             if tk not in self.entries:
                                 self.entries.add(tk)
-                            work.append(tk)
+                            push(tk, spec)
                         elif ts is not seg:
                             self.entries.add(tk)    # a branch into another segment: a function of its own
-                            work.append(tk)
+                            push(tk, spec)
                         else:
-                            work.append(tk)
+                            push(tk, spec)
                     if ins.flow == 'call':
                         self.resume.add((si, ins.next, thumb))
                 for kind, rm in [e for e in ins.extra if isinstance(e, tuple) and isinstance(e[0], str)]:
+                    jk = (si, ins.addr, thumb)
                     targets = self._jump_table(seg, ins, kind, rm, recent)
-                    self.extra_targets[(si, ins.addr, thumb)] = targets
+                    if targets is None:
+                        self._unbounded.add(jk)
+                        continue
+                    self.extra_targets[jk] = targets
                     for ta, tt in targets:
                         if seg.contains(ta, 2):
                             tk = (si, ta, tt)
                             self.resume.add(tk)
-                            work.append(tk)
+                            push(tk, spec)
                 if ins.flow in ('split', 'icall'):
                     self.resume.add((si, ins.next, thumb))
                 ends = ins.flow == 'stop' or (ins.cond is None and ins.flow in ('jump', 'ret'))
@@ -219,7 +299,7 @@ class Program:
                     break
                 addr = ins.next
 
-    def _literal_candidate(self, seg, lit, work):
+    def _literal_candidate(self, seg, lit, push):
         for s in self.segs_for(lit, seg):
             if not s.contains(lit, 4):
                 continue
@@ -229,34 +309,100 @@ class Program:
             if not thumb and a & 3:
                 continue
             for k in self.add_entry(a, thumb, speculative=True):
-                work.append(k)
+                push(k, True)
             break
 
     def _jump_table(self, seg, ins, kind, rm, recent):
-        """The entries of a jump table, bounded by the cmp rm, #n just before it."""
-        n = None
-        for prev in reversed(recent[-6:-1]):
+        """The entries of a jump table (None when this walk didn't come through its bound):
+        - add pc, pc, rm, lsl #2 after cmp rm, #n: a table of n + 1 branches follows;
+        - the same add pc after ldrb rm, [rt, ri] (or add ri, ri, ri; ldrh rm, [rt, ri]),
+          with cmp ri, #n before it and rt loaded from a literal: a table of n + 1 byte
+          (or halfword) offsets at rt, each case at pc + 4 * offset (GCC 15);
+        - ldr pc, [pc, rm, lsl #2] after cmp rm, #n: a table of n + 1 addresses follows."""
+        i = len(recent) - 1        # recent[i] is the jump
+        out = []
+        if kind == 'addpc':
+            load, size, ri = recent[i - 1] if i >= 1 else None, 0, None
+            if load is not None and not load.thumb and ((load.word >> 12) & 0xF) == rm:
+                w = load.word
+                if (w & 0x0FF00FF0) == 0x07D00000:             # ldrb rm, [rt, ri]
+                    size, ri, at = 1, w & 0xF, i - 1
+                elif (w & 0x0FF00FF0) == 0x019000B0 and i >= 2:  # ldrh rm, [rt, ri]
+                    dbl = recent[i - 2].word if not recent[i - 2].thumb else 0
+                    r = w & 0xF
+                    if dbl in (0xE0800000 | (r << 16) | (r << 12) | r, 0xE1A00080 | (r << 12) | r):
+                        size, ri, at = 2, r, i - 2               # after add ri, ri, ri or lsl ri, ri, #1
+            if size and ri == (load.word >> 16) & 0xF:
+                return None     # base and index in one register: not a table
+            if size:
+                n = self._bound(recent, at, ri)
+                base = self._const(recent, at, (load.word >> 16) & 0xF)
+                if n is None or base is None:
+                    return None
+                ts = next((s for s in self.segs_for(base, seg) if s.contains(base, size * (n + 1))), None)
+                if ts is None:
+                    return None
+                for k in range(n + 1):
+                    off = ts.data[base - ts.addr + k] if size == 1 else ts.u16(base + 2 * k)
+                    out.append((ins.addr + 8 + 4 * off, False))
+                return out
+        n = self._bound(recent, i, rm)
+        if n is None:
+            return None
+        if kind == 'addpc':
+            out = [(ins.addr + 8 + 4 * k, False) for k in range(n + 1)]
+        else:
+            base = ins.addr + 8
+            for k in range(n + 1):
+                if not seg.contains(base + 4 * k, 4):
+                    break
+                v = seg.u32(base + 4 * k)
+                self.literals.add(base + 4 * k)
+                out.append((v & ~1, bool(v & 1) and self.arch >= 5))
+        return out
+
+    @staticmethod
+    def _bound(recent, i, r):
+        """n from the cmp r, #n shortly before recent[i], if nothing in between writes r."""
+        for prev in reversed(recent[max(0, i - 6):i]):
+            if prev.thumb:
+                return None
             w = prev.word
-            if not prev.thumb and (w & 0x0FF0F000) == 0x03500000 and ((w >> 16) & 0xF) == rm:
+            if (w & 0x0FF0F000) == 0x03500000 and ((w >> 16) & 0xF) == r:
                 imm = w & 0xFF
                 rot = ((w >> 8) & 0xF) * 2
                 n = ((imm >> rot) | (imm << (32 - rot))) & 0xFFFFFFFF if rot else imm
-                break
-        if n is None or n > 1024:
-            self.warnings.append(f'{seg.name}: jump table at {ins.addr:#x} without a bound')
-            return []
-        out = []
-        if kind == 'addpc':
-            out = [(ins.addr + 8 + 4 * i, False) for i in range(n + 1)]
-        else:
-            base = ins.addr + 8
-            for i in range(n + 1):
-                if not seg.contains(base + 4 * i, 4):
-                    break
-                v = seg.u32(base + 4 * i)
-                self.literals.add(base + 4 * i)
-                out.append((v & ~1, bool(v & 1) and self.arch >= 5))
-        return out
+                return n if n <= 1024 else None
+            wr = arm_writes(w)
+            if wr is None or r in wr:
+                return None
+        return None
+
+    def _const(self, recent, i, r):
+        """The value r holds at recent[i], when the last write to it was a literal load
+        (ldr r, [pc, #imm]) or an adr (add/sub r, pc, #imm)."""
+        for prev in reversed(recent[max(0, i - 32):i]):
+            if prev.thumb:
+                return None
+            w = prev.word
+            wr = arm_writes(w)
+            if wr is None:
+                return None
+            if r not in wr:
+                continue
+            if (w >> 28) != 0xE or ((w >> 12) & 0xF) != r or wr != {r}:
+                return None
+            if (w & 0x0F7F0000) == 0x051F0000:              # ldr r, [pc, #+-imm]
+                lit = (prev.addr + 8 + ((w & 0xFFF) if w & (1 << 23) else -(w & 0xFFF))) & 0xFFFFFFFF
+                s = next((s for s in self.segs_for(lit) if s.contains(lit, 4)), None)
+                return s.u32(lit) if s is not None else None
+            if (w & 0x0FEF0000) in (0x028F0000, 0x024F0000):  # add/sub r, pc, #imm
+                imm = w & 0xFF
+                rot = ((w >> 8) & 0xF) * 2
+                imm = ((imm >> rot) | (imm << (32 - rot))) & 0xFFFFFFFF if rot else imm
+                return (prev.addr + 8 + (imm if (w & 0x01E00000) == 0x00800000 else -imm)) & 0xFFFFFFFF
+            return None
+        return None
 
     # -- C output ------------------------------------------------------------
     def _disasm(self, ins):
@@ -440,6 +586,8 @@ class Program:
             f.write('\n'.join(out) + '\n')
 
     def stats(self):
-        funcs = len(self.entries)
-        n = len(self.insns)
-        return {'functions': funcs, 'instructions': n, 'labels': len(self.resume), 'rejected_candidates': len(self.rejected)}
+        """Instruction counts are of walked code: rejected candidates' decodes don't count."""
+        walked = {k for k in self._visited | self._spec_visited if self.insns.get(k) is not None}
+        return {'functions': len(self.entries), 'instructions': len(walked), 'thumb': sum(1 for k in walked if k[2]),
+                'from_candidates': len(walked - self._visited), 'labels': len(self.resume),
+                'rejected_candidates': len(self.rejected)}
