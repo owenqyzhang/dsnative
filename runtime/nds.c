@@ -11,6 +11,7 @@ void dsr_flush_cache(Cpu *c);
 
 #define CPU_OF(c) ((c)->arch == 5 ? 0 : 1)
 #define SYS(c) ((Nds *)(c)->sys)
+#define GXFIFO_BURST 112
 
 /* ---- VRAM banks ------------------------------------------------------------ */
 static const u32 bank_off[9] = {0x00000, 0x20000, 0x40000, 0x60000, 0x80000, 0x90000, 0x94000, 0x98000, 0xA0000};
@@ -183,13 +184,17 @@ static void dma_run(Nds *s, int cpu, int ch) {
     int sc = (cnt >> 23) & 3, dc = (cnt >> 21) & 3;
     s32 ss = sc == 0 ? (s32)unit : sc == 1 ? -(s32)unit : 0;
     s32 ds = (dc == 0 || dc == 3) ? (s32)unit : dc == 1 ? -(s32)unit : 0;
-    for (u32 i = 0; i < d->icount; i++) {
+    int timing = dma_timing(cpu, cnt);
+    u32 n = d->icount;
+    int gx = cpu == 0 && timing == 7;
+    if (gx && n > GXFIFO_BURST) n = GXFIFO_BURST;      /* geometry FIFO mode moves 112 words a time */
+    for (u32 i = 0; i < n; i++) {
         if (word) wr32(c, d->idst, rd32(c, d->isrc));
         else wr16(c, d->idst, rd16(c, d->isrc));
         d->isrc += (u32)ss; d->idst += (u32)ds;
     }
-    c->budget -= (s32)d->icount;
-    int timing = dma_timing(cpu, cnt);
+    c->budget -= (s32)n;
+    if (gx && (d->icount -= n)) return;                 /* more bursts when the FIFO has room */
     if ((cnt & (1u << 25)) && timing != 0 && !(cpu == 0 && timing == 7)) {
         u32 mask = cpu == 0 ? 0x1FFFFF : (ch == 3 ? 0xFFFF : 0x3FFF);
         d->icount = d->cnt & mask; if (!d->icount) d->icount = mask + 1;
@@ -209,6 +214,16 @@ static void dma_trigger(Nds *s, int cpu, int timing) {
     }
 }
 
+/* Geometry FIFO DMA (ARM9 timing 7): a burst whenever the FIFO is under half full, until the
+ * channel has sent all it was given. Called when a channel is enabled and when the 3D engine
+ * resumes after SWAP_BUFFERS; the commands a burst writes never call back in here. */
+void nds_gxfifo_dma(Nds *s) {
+    for (int ch = 0; ch < 4; ch++) {
+        Dma *d = &s->dma[0][ch];
+        while ((d->cnt & 0x80000000u) && dma_timing(0, d->cnt) == 7 && gpu3d_fifo_wants_dma(s)) dma_run(s, 0, ch);
+    }
+}
+
 static void dma_write_cnt(Nds *s, int cpu, int ch, u32 v) {
     Dma *d = &s->dma[cpu][ch];
     u32 old = d->cnt;
@@ -218,7 +233,8 @@ static void dma_write_cnt(Nds *s, int cpu, int ch, u32 v) {
         d->isrc = d->src; d->idst = d->dst;
         d->icount = v & mask; if (!d->icount) d->icount = mask + 1;
         int t = dma_timing(cpu, v);
-        if (t == 0 || (cpu == 0 && t == 7)) dma_run(s, cpu, ch);
+        if (cpu == 0 && t == 7) nds_gxfifo_dma(s);
+        else if (t == 0) dma_run(s, cpu, ch);
         else if (((cpu == 0 && t == 5) || (cpu == 1 && t == 2)) && s->card_left) dma_run(s, cpu, ch);
     }
 }
@@ -584,7 +600,7 @@ static void io_write32(Nds *s, int cpu, u32 a, u32 v) {
         sqrt_compute(s);
         return;
     }
-    if (a >= 0x400 && a < 0x700 && cpu == 0) { memcpy(&s->io[cpu][a], &v, 4); return; }   /* 3D: not yet */
+    if (a >= 0x400 && a < 0x700 && cpu == 0) { memcpy(&s->io[cpu][a], &v, 4); return; }   /* 3D registers gpu3d.c leaves alone (above 0x6A4) */
     if (a < 0x2000) { io_write16(s, cpu, a, (u16)v); io_write16(s, cpu, a + 2, (u16)(v >> 16)); }
 }
 

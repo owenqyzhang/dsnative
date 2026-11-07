@@ -93,6 +93,8 @@ void nds_shutdown(Nds *s);
 /* Takes up to max_frames stereo frames (left, right) of mixed sound produced since the last
  * call, at 32768 Hz; returns how many it wrote. */
 u32 nds_audio_take(Nds *s, s16 *out, u32 max_frames);
+/* 3D engine: send what geometry FIFO DMA channels have waiting while the FIFO has room. */
+void nds_gxfifo_dma(Nds *s);
 
 /* gpu2d.c */
 void gpu2d_render_line(Nds *s, int engine, int line, u32 *out);

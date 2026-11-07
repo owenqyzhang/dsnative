@@ -1,8 +1,9 @@
 /* dsnative runtime: the two 2D engines, one scanline at a time. Text, affine and extended
  * (affine-tiled and bitmap) backgrounds, sprites (regular and affine, 1D and 2D tile
  * mapping, extended palettes), priorities, colour effects and master brightness, plus the
- * VRAM display mode. Not yet: the 3D layer, windows, mosaic, bitmap sprites, the large
- * bitmap mode and main-memory display. Reference: GBATEK, DS Video. */
+ * VRAM display mode, and engine A's 3D layer as BG0 (gpu3d_render.c draws it). Not yet:
+ * windows, mosaic, bitmap sprites, the large bitmap mode and main-memory display.
+ * Reference: GBATEK, DS Video. */
 #include "nds.h"
 
 extern u8 *vram_extpal[4][4];
@@ -33,6 +34,19 @@ static u16 vhalf(Nds *s, int engine, int obj, u32 off) {
 static u16 ext_color(int region, int slot, u32 index) {
     u8 *p = vram_extpal[region][slot & 3];
     return p ? rd16v(p + (index & 0xFFF) * 2) : 0;
+}
+
+/* The 3D layer as BG0: BG0HOFS scrolls a region of 512 pixels, the 256 of the 3D image then
+ * 256 transparent ones; vertical scroll and mosaic have no effect. alpha is the 3D pixel's. */
+static void bg0_3d(Nds *s, const u8 *io, int line, Layer *L, u8 *alpha) {
+    u16 px[SCREEN_W]; u8 a[SCREEN_W];
+    gpu3d_bg0_line(s, line, px, a);
+    u32 hofs = rd16v(io + 0x10) & 0x1FF;
+    for (u32 x = 0; x < SCREEN_W; x++) {
+        u32 sx = (x + hofs) & 0x1FF;
+        L->px[x] = sx < SCREEN_W ? px[sx] : 0;
+        alpha[x] = sx < SCREEN_W ? a[sx] : 0;
+    }
 }
 
 static void text_bg(Nds *s, int engine, const u8 *io, u32 dispcnt, int bg, int line, Layer *L) {
@@ -221,10 +235,12 @@ void gpu2d_render_line(Nds *s, int engine, int line, u32 *out) {
     } else {
         int bgmode = dispcnt & 7;
         static Layer bgs[4];
+        static u8 a3d[SCREEN_W];
         int en[4] = {0, 0, 0, 0};
+        int is3d = engine == 0 && (dispcnt & 8) && (dispcnt & 0x100);
         for (int i = 0; i < 4; i++) {
             if (!(dispcnt & (0x100u << i))) continue;
-            if (i == 0 && engine == 0 && (dispcnt & 8)) continue;     /* 3D layer: not yet */
+            if (i == 0 && is3d) { bg0_3d(s, io, line, &bgs[0], a3d); en[0] = 1; continue; }
             int type = 0;   /* 0 text, 1 affine, 2 extended */
             if (i == 3) type = (bgmode == 1 || bgmode == 2) ? 1 : (bgmode >= 3 && bgmode <= 5) ? 2 : 0;
             if (i == 2) type = (bgmode == 2 || bgmode == 4) ? 1 : (bgmode == 5) ? 2 : 0;
@@ -257,7 +273,10 @@ void gpu2d_render_line(Nds *s, int engine, int line, u32 *out) {
             u16 c = c1 & 0x7FFF;
             int first = (bldcnt >> id1) & 1, second = (bldcnt >> (8 + id2)) & 1;
             if (id1 == 4 && osemi[x] && second) c = blend_alpha(c1, c2, eva, evb);
-            else if (effect == 1 && first && second) c = blend_alpha(c1, c2, eva, evb);
+            else if (effect == 1 && first && second) {
+                if (id1 != 0 || !is3d) c = blend_alpha(c1, c2, eva, evb);
+                else if (a3d[x] < 31) c = blend_alpha(c1, c2, a3d[x] / 2u, 16 - a3d[x] / 2u);   /* the 3D layer blends by its own alpha, never EVA/EVB (GBATEK's guess); 31 is opaque */
+            }
             else if (effect == 2 && first) c = brighten(c, ey, 1);
             else if (effect == 3 && first) c = brighten(c, ey, 0);
             line_px[x] = c;

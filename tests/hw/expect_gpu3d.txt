@@ -1,0 +1,17 @@
+# The 3D engine's geometry side (gpu3d_9.c): GXSTAT, box and position tests, matrix stacks, the
+# FIFO and its interrupt and DMA. No arguments; the values are GBATEK's, not measured on hardware.
+# FIFO empty and under half full at power-on; the box test is busy right after it is sent
+gxstat 06000000
+boxbusy 00000001 00000000
+# inside, outside, around the whole view volume (false: only the faces are tested), a face through
+# it (as a packed GXFIFO command), beyond the far plane
+box 00000001 00000000 00000000 00000001 00000000
+# scale 2 then translate 1 2 3 on the left of it: the translation becomes 2 4 6
+clip 00002000 00002000 00004000 00006000
+postest 00003000 00005000 00007000 00001000
+stack 00000300 00000000
+pstack 00002000 00000000 00008000 00000000
+fifo ok
+fifodone 06000000
+gxirq ok
+gxdma 00001000 00002000 00003000
