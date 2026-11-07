@@ -51,6 +51,8 @@ struct Cpu {
     /* the code: a table from guest address to recompiled function (cpu.c) */
     const struct DispatchEntry *table;
     u32 table_len;
+    const struct PicEntry *pic; /* code without an address (a stub run from the stack), found by its bytes */
+    u32 pic_len;
     /* statistics */
     u64 dispatches, misses;
     u32 last_miss;
@@ -76,6 +78,14 @@ typedef struct DispatchEntry {
     GuestFn fn;
     const u8 *check;            /* the bytes the code was recompiled from */
 } DispatchEntry;
+
+/* Code that runs wherever it is: nothing in it depends on its own address. The dispatcher
+ * runs it on an address nothing was compiled for, when memory there holds `bytes`. */
+typedef struct PicEntry {
+    u32 len;                    /* bytes, a multiple of 4 (ARM code) */
+    const u8 *bytes;
+    GuestFn fn;
+} PicEntry;
 
 /* ---- memory ------------------------------------------------------------- */
 u32 dsr_read_slow(Cpu *c, u32 a, int size);

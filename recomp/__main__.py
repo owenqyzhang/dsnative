@@ -77,7 +77,8 @@ def main():
     extra = read_extra(args.extra)
     for cpu, arch, prefix in ((9, 5, 'g9'), (7, 4, 'g7')):
         segs = [(s.name, s.addr, s.data, s.kind) for s in rom.segments(cpu, overlays=not args.no_overlays)]
-        prog = Program(segs, arch=arch, prefix=prefix)
+        pic = [(s.name, s.data) for s in rom.pic_stubs.get(cpu, [])]
+        prog = Program(segs, arch=arch, prefix=prefix, pic=pic)
         entries = [(h[f'arm{cpu}_entry'], False)] + extra[cpu]
         prog.discover(entries)
         prog.emit(gen)

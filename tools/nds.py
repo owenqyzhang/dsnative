@@ -141,7 +141,7 @@ class Segment:
     addr: int
     data: bytes
     bss: int = 0
-    kind: str = 'static'    # static, autoload, stub, overlay
+    kind: str = 'static'    # static, autoload, stub, overlay; pic: code that runs wherever it is copied (addr is 0)
     overlay_id: int = -1
 
     @property
@@ -199,6 +199,7 @@ class Rom:
     params7: ModuleParams = None
     autoloads7: list = field(default_factory=list)  # list of Segment (ARM7)
     stubs: dict = field(default_factory=dict)       # cpu -> list of Segment: code crt0 copies and runs
+    pic_stubs: dict = field(default_factory=dict)   # cpu -> list of Segment (kind 'pic', no address): code run from the stack
     overlays9: list = field(default_factory=list)
     overlays7: list = field(default_factory=list)
     fat: list = field(default_factory=list)
@@ -251,6 +252,7 @@ class Rom:
         if self.params7 is not None:
             self.autoloads7 = self._parse_autoloads(7, self.arm7, h['arm7_ram'], self.params7)
         self.stubs = {9: self._find_stubs(9, self.arm9, h['arm9_ram']), 7: self._find_stubs(7, self.arm7, h['arm7_ram'])}
+        self.pic_stubs = {9: self._find_pic_stubs(9, self.arm9, h['arm9_ram']), 7: self._find_pic_stubs(7, self.arm7, h['arm7_ram'])}
         self._parse_fs()
         self.overlays9 = self._parse_ovt(h['ovt9_off'], h['ovt9_size'])
         self.overlays7 = self._parse_ovt(h['ovt7_off'], h['ovt7_size'])
@@ -338,6 +340,27 @@ class Rom:
             i = img.find(loop, i + 1)
         return out
 
+    @staticmethod
+    def _find_pic_stubs(cpu, img, ram):
+        """Code start-up copies onto its stack and jumps to, so it runs wherever the stack is
+        and has no address (SDK 5's ARM7 crt0 ends this way: the last handshake write,
+        strh r2, [r1]; bx r0). Each `bx rN` is run backwards-first: the straight-line code
+        before it, with what it loads from the image known and the stack as offsets from
+        the sp it started with. If rN is then an address on the stack, the stub is the words
+        stored from there up to the first bx. A store the run can't place, or an instruction
+        it doesn't model, forgets the stack: only a copy it follows to the end is a stub."""
+        n = len(img) // 4
+        out, seen = [], set()
+        for i in range(n):
+            w = u32(img, 4 * i)
+            if w & 0xFFFFFFF0 != 0xE12FFF10 or (w & 0xF) in (14, 15):
+                continue
+            code = _stack_copy(img, ram, i, w & 0xF)
+            if code is not None and code not in seen:
+                seen.add(code)
+                out.append(Segment(f'pic{len(out)}', cpu, 0, code, 0, 'pic'))
+        return out
+
     def _parse_fs(self):
         h = self.header
         d = self.data
@@ -417,6 +440,79 @@ class Rom:
             for ov in self.overlays9:
                 segs.append(Segment(f'ov9_{ov.id:03d}', 9, ov.ram_addr, self.overlay_image(ov), ov.bss_size, 'overlay', ov.id))
         return segs
+
+
+def _stack_copy(img, ram, at, rn, window=32):
+    """The code the straight-line instructions before the `bx rn` at word `at` of img (loaded
+    at ram) copied to the stack and rn points at, or None. See Rom._find_pic_stubs.
+
+    A value is an int, or ('sp', k) for the sp the run started with, + k; unknown values are
+    left out of `regs`, and `mem` holds the words stored on the stack, by offset."""
+    regs, mem = {}, {}
+
+    def reset():
+        regs.clear()
+        mem.clear()
+        regs[13] = ('sp', 0)        # a new base: nothing stored before is on this stack
+
+    def word(a):
+        o = a - ram
+        return u32(img, o) if a % 4 == 0 and 0 <= o <= len(img) - 4 else None
+
+    def plus(v, d):
+        if isinstance(v, int):
+            return (v + d) & 0xFFFFFFFF
+        return ('sp', v[1] + d) if v is not None else None
+
+    def put(r, v):
+        if v is None:
+            regs.pop(r, None)
+        else:
+            regs[r] = v
+
+    reset()
+    for j in range(max(0, at - window), at):
+        w = u32(img, 4 * j)
+        op, opc = (w >> 25) & 7, (w >> 21) & 0xF
+        rd, rb = (w >> 12) & 0xF, (w >> 16) & 0xF
+        if w >> 28 != 0xE or rd == 15:
+            reset()
+        elif op == 1 and opc in (2, 4, 13) and not w & (1 << 20):      # sub, add, mov rd, #imm
+            rot = ((w >> 8) & 0xF) * 2
+            imm = (((w & 0xFF) >> rot) | ((w & 0xFF) << (32 - rot))) & 0xFFFFFFFF
+            put(rd, imm if opc == 13 else plus(regs.get(rb), imm if opc == 4 else -imm))
+        elif (w & 0x0FFF0FF0) == 0x01A00000:                            # mov rd, rm
+            put(rd, regs.get(w & 0xF))
+        elif op == 2 and not w & (1 << 22) and not (w & (1 << 21) and (rb == rd or not w & (1 << 24))):
+            # ldr/str rd, [rn, #+-imm]{!} or [rn], #+-imm (not the byte forms, nor ldrt/strt)
+            off = (w & 0xFFF) if w & (1 << 23) else -(w & 0xFFF)
+            pre = bool(w & (1 << 24))
+            base = ram + 4 * j + 8 if rb == 15 else regs.get(rb)
+            ea = plus(base, off) if pre else base
+            if w & (1 << 20):
+                if isinstance(ea, int):
+                    put(rd, word(ea))
+                else:
+                    put(rd, mem.get(ea[1]) if ea is not None else None)
+            elif isinstance(ea, tuple):
+                v = regs.get(rd)
+                mem[ea[1]] = v if isinstance(v, int) else None
+            else:
+                mem.clear()         # a store through a base this run doesn't know may hit the stack
+            if rb != 15 and (not pre or w & (1 << 21)):
+                put(rb, plus(base, off) if not pre else ea)
+        else:
+            reset()
+    v = regs.get(rn)
+    if not isinstance(v, tuple) or v[1] % 4:
+        return None
+    words, k = [], v[1]
+    while mem.get(k) is not None:
+        words.append(mem[k])
+        k += 4
+        if words[-1] & 0xFFFFFFF0 == 0xE12FFF10:
+            return b''.join(struct.pack('<I', x) for x in words)
+    return None
 
 
 def crc16(data, crc=0xFFFF):

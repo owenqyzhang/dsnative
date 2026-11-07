@@ -64,10 +64,58 @@ def check_stub():
     assert any(s.kind == 'stub' for s in rom.segments(9)), 'the stub is not among the ARM9 segments'
 
 
+def pic_rom(copy_words, stub):
+    """An ARM7 whose start-up (at 0x50) ends in `copy_words`, then the jump at 0x70, with the stub
+    at 0xA0, the way SDK 5's crt0 copies its last two words to the stack and jumps there."""
+    img = bytearray(arm7_image(3)[0])
+    code = [0xE59F4038,         # ldr r4, [pc, #0x38]  (the stub's address, at 0x90)
+            0xE4945004,         # ldr r5, [r4], #4
+            0xE50D5004,         # str r5, [sp, #-4]
+            0xE5945000,         # ldr r5, [r4]
+            0xE58D5000,         # str r5, [sp]
+            0xE3A02004,         # mov r2, #4
+            0xE59F0024,         # ldr r0, [pc, #0x24]  (the code to run next, at 0x94)
+            *copy_words,
+            0xE12FFF13,         # 0x70: bx r3
+            0xEAFFFFFE]         # b .
+    struct.pack_into(f'<{len(code)}I', img, 0x50, *code)
+    struct.pack_into('<II', img, 0x90, ARM7 + 0xA0, 0x037F8000)
+    struct.pack_into(f'<{len(stub)}I', img, 0xA0, *stub)
+    return Rom.load(build_rom(struct.pack('<I', 0xEAFFFFFE), 0x02000000, 0x02000000, bytes(img), ARM7, ARM7))
+
+
+STRH_R2_R1, BX_R0 = 0xE1C120B0, 0xE12FFF10
+
+
+def check_pic_stub():
+    """Code copied to the stack and jumped to has no address: the reader returns it as a
+    position-independent stub, not as a segment."""
+    rom = pic_rom([0xE24D3004], [STRH_R2_R1, BX_R0])       # sub r3, sp, #4
+    got = [(s.addr, s.data, s.kind) for s in rom.pic_stubs[7]]
+    assert got == [(0, struct.pack('<II', STRH_R2_R1, BX_R0), 'pic')], got
+    assert not rom.pic_stubs[9] and not rom.stubs[7], 'a stack stub is not a start-up stub of a fixed address'
+    assert all(s.kind != 'pic' for s in rom.segments(7)), 'a stub without an address is not a segment'
+
+
+def check_no_pic_stub():
+    """Only a copy the reader follows to its end is a stub."""
+    cases = {
+        'a jump to a register that is not on the stack': ([0xE1A03000], [STRH_R2_R1, BX_R0]),       # mov r3, r0
+        'a store after the copy through an unknown base': ([0xE5862000, 0xE24D3004], [STRH_R2_R1, BX_R0]),    # str r2, [r6]
+        'a stack address that isn\'t the first word copied': ([0xE24D3008], [STRH_R2_R1, BX_R0]),   # sub r3, sp, #8
+        'a copy that is not code that leaves': ([0xE24D3004], [STRH_R2_R1, STRH_R2_R1]),
+        'a stack pointer written in between': ([0xE24DD010, 0xE24D3004], [STRH_R2_R1, BX_R0]),      # sub sp, sp, #16
+    }
+    for what, (copy, stub) in cases.items():
+        got = pic_rom(copy, stub).pic_stubs[7]
+        assert not got, f'{what}: found {[s.data.hex() for s in got]}'
+
+
 def main():
     failed = 0
     for name, fn in [('ARM7 autoloads, 3-word entries', lambda: check(3)), ('ARM7 autoloads, 4-word entries', lambda: check(4)),
-                     ('start-up stub', check_stub)]:
+                     ('start-up stub', check_stub), ('stack stub', check_pic_stub),
+                     ('no stack stub', check_no_pic_stub)]:
         try:
             fn()
             print(f'ok    {name}')

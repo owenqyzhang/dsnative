@@ -36,7 +36,6 @@ class Insn:
     target: int = None
     target_thumb: bool = None
     literals: list = field(default_factory=list)    # addresses of literal pool words read
-    extra: list = field(default_factory=list)       # more targets (addr, thumb): jump tables
     word: int = 0
     pair: bool = False          # Thumb BL/BLX emitted as one 4-byte instruction
 
@@ -171,9 +170,6 @@ def arm_dataproc(w, ins, arch):
             # ARMv4/v5 data-processing writes to the PC do not change the state
             code.append(f'return {res} & ~3u;')
         ins.flow = 'ret'
-        # Jump table: add pc, pc, rX, lsl #2  — the table of branches follows
-        if op == 4 and rn == 15 and not (w & (1 << 25)) and not (w & 0x10) and ((w >> 5) & 3) == 0 and ((w >> 7) & 0x1F) == 2:
-            ins.extra.append(('addpc', w & 0xF))
         ins.code = ['{ ' + ' '.join(code) + ' }']
         return
     code.append(f'R[{rd}] = {res};')
@@ -343,9 +339,6 @@ def arm_single(w, ins, arch):
         if rd == 15:
             c.append('return dsr_ldpc(c, v);')
             ins.flow = 'ret'
-            # ldr pc, [pc, rX, lsl #2]: a table of addresses follows
-            if regoff and rn == 15 and p and u and ((w >> 5) & 3) == 0 and ((w >> 7) & 0x1F) == 2:
-                ins.extra.append(('ldrpc', w & 0xF))
         else:
             c.append(f'R[{rd}] = v;')
     else:
@@ -656,8 +649,6 @@ def decode_thumb(addr, hw, next_hw=None, arch=5):
             if rd == 15:
                 ins.code = [f'return ({val}) & ~1u;']
                 ins.flow = 'ret'
-                if o == 0 and rs < 8:
-                    ins.extra.append(('taddpc', rs))   # add pc, rN: a Thumb switch's table
             else:
                 ins.code = [f'R[{rd}] = {val};']
             return ins

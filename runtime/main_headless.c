@@ -16,6 +16,10 @@ extern const DispatchEntry g9_table[];
 extern const u32 g9_table_len;
 extern const DispatchEntry g7_table[];
 extern const u32 g7_table_len;
+extern const PicEntry g9_pic[];
+extern const u32 g9_pic_len;
+extern const PicEntry g7_pic[];
+extern const u32 g7_pic_len;
 
 static u8 *read_file(const char *path, u32 *len) {
     FILE *f = fopen(path, "rb");
@@ -110,6 +114,8 @@ int main(int argc, char **argv) {
         if (!nds_option(s, opts[i], opts[i + 1])) { fprintf(stderr, "unknown option %s\n", opts[i]); return 2; }
     s->arm9.table = g9_table; s->arm9.table_len = g9_table_len;
     s->arm7.table = g7_table; s->arm7.table_len = g7_table_len;
+    s->arm9.pic = g9_pic; s->arm9.pic_len = g9_pic_len;
+    s->arm7.pic = g7_pic; s->arm7.pic_len = g7_pic_len;
     nds_direct_boot(s, a9, a9_len);
     for (int f = 0; f < frames; f++) {
         /* input script */

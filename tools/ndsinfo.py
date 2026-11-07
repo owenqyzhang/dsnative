@@ -46,6 +46,8 @@ def main():
     for cpu in (9, 7):
         for s in rom.stubs.get(cpu, []):
             print(f'ARM{cpu} start-up stub copied to {s.addr:#010x} and run: {len(s.data):#x} bytes')
+        for s in rom.pic_stubs.get(cpu, []):
+            print(f'ARM{cpu} stub copied to the stack and run (no address): {len(s.data):#x} bytes')
     else:
         print('no Nitro SDK module parameters (homebrew?)')
     for cpu, ovs in ((9, rom.overlays9), (7, rom.overlays7)):
@@ -73,6 +75,7 @@ def main():
                   f'({st["thumb"]} Thumb, {st["from_candidates"]} reached only from pointer candidates), '
                   f'{st["rejected_candidates"]} pointer candidates rejected, '
                   f'{len(prog.warnings)} warnings, {time.time() - t:.1f} s')
+            print(f'ARM{cpu} jump tables: {st["tables"]} with {st["cases"]} cases, {st["unbounded"]} without a bound')
             for w in prog.warnings[:8]:
                 print(f'    {w}')
 

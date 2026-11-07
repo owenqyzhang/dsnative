@@ -18,6 +18,7 @@ except ImportError:     # disassembly comments are optional
     capstone = None
 
 from .isa import decode_arm, decode_thumb, Insn, h
+from .jumps import evaluate, jump_kind, table_form
 
 
 def arm_writes(w):
@@ -92,25 +93,28 @@ class Seg:
 
 
 class Program:
-    def __init__(self, segments, arch=5, prefix='g9'):
+    def __init__(self, segments, arch=5, prefix='g9', pic=()):
         """segments: list of (name, addr, data, kind); kind 'overlay' marks code whose
         address other code can share, 'stub' code crt0 copies somewhere and runs. Code at
-        an address several segments share is checked against memory at run time."""
+        an address several segments share is checked against memory at run time.
+        pic: (name, data) of code with no address of its own (a stub run from the stack),
+        compiled as functions the dispatcher finds by their bytes (see emit_pic)."""
         self.segs = [Seg(i, *s) for i, s in enumerate(segments)]
         for a in self.segs:
             a.overlaps = [b for b in self.segs if b is not a and a.addr < b.end and b.addr < a.end]
         self.arch = arch
         self.prefix = prefix
+        self.pic = list(pic)
         self.insns = {}             # (seg, addr, thumb) -> Insn
         self.entries = set()        # function entries (seg, addr, thumb)
         self.resume = set()         # labels that must exist: return sites, jump-table targets, saved contexts
         self.extra_targets = {}     # (seg, addr, thumb) -> [(addr, thumb)] (jump tables)
+        self._jumps = {}            # (seg, addr, thumb) -> what jumps.evaluate found there
         self.rejected = set()
         self.literals = set()
         self.warnings = []
         self._visited = set()       # instructions on walks from the entry points
         self._spec_visited = set()  # instructions reached only from pointer candidates
-        self._unbounded = set()     # jump tables no walk found the bound of
         self._cs = None
 
     # -- segments ------------------------------------------------------------
@@ -194,9 +198,8 @@ class Program:
             work.extend(self._scan_data())
             if not work:
                 break
-        for si, a, t in sorted(self._unbounded - self.extra_targets.keys()):
+        for si, a, t in sorted(k for k, v in self._jumps.items() if v == 'unbounded'):
             self.warnings.append(f'{self.segs[si].name}: jump table at {a:#x} without a bound')
-        self._unbounded.clear()
         return self
 
     def _scan_data(self):
@@ -262,14 +265,8 @@ class Program:
                 for lit in ins.literals:
                     self.literals.add(lit)
                     self._literal_candidate(seg, lit, push)
-                if not thumb and ins.flow in ('ret', 'icall') and (ins.word & 0x0FFFFFD0) == 0x012FFF10:
-                    # bx/blx rN after ldr rN, =f: f is code, as surely as this walk is
-                    v = self._const(seg, recent, len(recent) - 1, ins.word & 0xF)
-                    if v is not None:
-                        for ts in self.segs_for(v & ~1, seg):
-                            tk = (ts.index, v & ~1, bool(v & 1))
-                            self.entries.add(tk)
-                            push(tk, spec)
+                if ins.flow in ('ret', 'icall') and jump_kind(ins):
+                    self._computed_jump(seg, ins, spec, push)
                 if not thumb and (ins.word & 0xFFFF0000) == 0xE28F0000:
                     # adr rN, x: an address saved for an exception-style return (subs pc, lr, #4),
                     # as OS_SaveContext saves its own resume point + 4
@@ -278,31 +275,22 @@ class Program:
                     if seg.contains(v - 4, 4):
                         self.resume.add((si, v - 4, False))
                 if ins.target is not None:
-                    for ts in self.segs_for(ins.target, seg):
+                    tsegs = self.segs_for(ins.target, seg)
+                    for ts in tsegs:
                         tk = (ts.index, ins.target, ins.target_thumb)
+                        # with several segments there, at most one is the code that runs
+                        sp = spec or len(tsegs) > 1
                         if ins.flow == 'call' or ins.target_thumb != thumb:
                             if tk not in self.entries:
                                 self.entries.add(tk)
-                            push(tk, spec)
+                            push(tk, sp)
                         elif ts is not seg:
                             self.entries.add(tk)    # a branch into another segment: a function of its own
-                            push(tk, spec)
+                            push(tk, sp)
                         else:
-                            push(tk, spec)
+                            push(tk, sp)
                     if ins.flow == 'call':
                         self.resume.add((si, ins.next, thumb))
-                for kind, rm in [e for e in ins.extra if isinstance(e, tuple) and isinstance(e[0], str)]:
-                    jk = (si, ins.addr, thumb)
-                    targets = self._jump_table(seg, ins, kind, rm, recent)
-                    if targets is None:
-                        self._unbounded.add(jk)
-                        continue
-                    self.extra_targets[jk] = targets
-                    for ta, tt in targets:
-                        if seg.contains(ta, 2):
-                            tk = (si, ta, tt)
-                            self.resume.add(tk)
-                            push(tk, spec)
                 if ins.flow in ('split', 'icall'):
                     self.resume.add((si, ins.next, thumb))
                 ends = ins.flow == 'stop' or (ins.cond is None and ins.flow in ('jump', 'ret'))
@@ -323,57 +311,37 @@ class Program:
                 push(k, True)
             break
 
-    def _jump_table(self, seg, ins, kind, rm, recent):
-        """The entries of a jump table (None when this walk didn't come through its bound):
-        - add pc, pc, rm, lsl #2 after cmp rm, #n: a table of n + 1 branches follows;
-        - the same add pc after ldrb rm, [rt, ri] (or add ri, ri, ri; ldrh rm, [rt, ri]),
-          with cmp ri, #n before it and rt loaded from a literal: a table of n + 1 byte
-          (or halfword) offsets at rt, each case at pc + 4 * offset (GCC 15);
-        - ldr pc, [pc, rm, lsl #2] after cmp rm, #n: a table of n + 1 addresses follows;
-        - Thumb add pc, rm (CodeWarrior's switch), see _thumb_table."""
-        i = len(recent) - 1        # recent[i] is the jump
-        out = []
-        if kind == 'taddpc':
-            return self._thumb_table(seg, ins.addr, rm)
-        if kind == 'addpc':
-            load, size, ri = recent[i - 1] if i >= 1 else None, 0, None
-            if load is not None and not load.thumb and ((load.word >> 12) & 0xF) == rm:
-                w = load.word
-                if (w & 0x0FF00FF0) == 0x07D00000:             # ldrb rm, [rt, ri]
-                    size, ri, at = 1, w & 0xF, i - 1
-                elif (w & 0x0FF00FF0) == 0x019000B0 and i >= 2:  # ldrh rm, [rt, ri]
-                    dbl = recent[i - 2].word if not recent[i - 2].thumb else 0
-                    r = w & 0xF
-                    if dbl in (0xE0800000 | (r << 16) | (r << 12) | r, 0xE1A00080 | (r << 12) | r):
-                        size, ri, at = 2, r, i - 2               # after add ri, ri, ri or lsl ri, ri, #1
-            if size and ri == (load.word >> 16) & 0xF:
-                return None     # base and index in one register: not a table
-            if size:
-                n = self._bound(recent, at, ri)
-                base = self._const(seg, recent, at, (load.word >> 16) & 0xF)
-                if n is None or base is None:
-                    return None
-                ts = next((s for s in self.segs_for(base, seg) if s.contains(base, size * (n + 1))), None)
-                if ts is None:
-                    return None
-                for k in range(n + 1):
-                    off = ts.data[base - ts.addr + k] if size == 1 else ts.u16(base + 2 * k)
-                    out.append((ins.addr + 8 + 4 * off, False))
-                return out
-        n = self._bound(recent, i, rm)
-        if n is None:
-            return self._unbounded_addpc(seg, ins) if kind == 'addpc' else None
-        if kind == 'addpc':
-            out = [(ins.addr + 8 + 4 * k, False) for k in range(n + 1)]
-        else:
-            base = ins.addr + 8
-            for k in range(n + 1):
-                if not seg.contains(base + 4 * k, 4):
-                    break
-                v = seg.u32(base + 4 * k)
-                self.literals.add(base + 4 * k)
-                out.append((v & ~1, bool(v & 1) and self.arch >= 5))
-        return out
+    def _computed_jump(self, seg, ins, spec, push):
+        """A jump to a computed address, as jumps.evaluate reads the code before it. A
+        constant (ldr r3, =main; blx r3) is a function entry, as surely as this walk is
+        code. A table's cases are labels of this function; in another state or segment, or
+        called, they are entries. An add pc, pc, rI, lsl #2 nothing bounds is a run of
+        branches or an unrolled loop (_unbounded_addpc); other tables are reported."""
+        jk = (seg.index, ins.addr, ins.thumb)
+        if jk not in self._jumps:
+            res = evaluate(self, seg, ins)
+            form = table_form(ins)
+            if res is None and form == 'addpc':
+                out = self._unbounded_addpc(seg, ins)
+                res = ('table', out) if out else 'unbounded'
+            elif res is None and form:
+                res = 'unbounded'
+            self._jumps[jk] = res
+        res = self._jumps[jk]
+        if not isinstance(res, tuple):
+            return
+        kind, targets = res
+        if kind == 'table':
+            self.extra_targets[jk] = targets
+        for ta, tt in targets:
+            tsegs = self.segs_for(ta, seg)
+            for ts in tsegs:
+                tk = (ts.index, ta, tt)
+                if kind == 'table' and ts is seg and tt == ins.thumb and ins.flow != 'icall':
+                    self.resume.add(tk)
+                else:
+                    self.entries.add(tk)
+                push(tk, spec or len(tsegs) > 1)
 
     def _unbounded_addpc(self, seg, ins):
         """add pc, pc, rm, lsl #2 with no cmp to bound it: every place it can land in what
@@ -399,85 +367,6 @@ class Program:
                 break
             a += 4
         return out or None
-
-    def _thumb_table(self, seg, jmp, r):
-        """CodeWarrior's Thumb switch on s:
-            adds r, s, s; add r, pc; ldrh r, [r, #k]; lsls r, r, #16; asrs r, r, #16; add pc, r
-        A table of signed halfwords at the add r, pc + 4 + k, each case at the add pc + 4
-        + its entry. All of it is read from memory, whichever walk reaches the add pc, and
-        the bound is in the code just before, which may be a walk of its own:
-            cmp s, #n; bhi default (n + 1 cases) or bcs default (n), then the table code;
-            cmp s, #n; bls 1f (n + 1) or bcc 1f (n); b default; 1: the table code."""
-        start = jmp - 10
-        if not seg.contains(start, 12):
-            return None
-        dbl, adr, ld, shl, sar = (seg.u16(start + 2 * j) for j in range(5))
-        i = (dbl >> 3) & 7
-        if (dbl & 0xFE00) != 0x1800 or (dbl >> 6) & 7 != i or dbl & 7 != r \
-                or (adr, shl, sar) != (0x4478 | r, 0x0400 | (r << 3) | r, 0x1400 | (r << 3) | r) \
-                or (ld & 0xF83F) != (0x8800 | (r << 3) | r):
-            return None
-        before = [seg.u16(start - 2 * j) if seg.contains(start - 2 * j, 2) else 0xFFFF for j in (1, 2, 3)]
-        cmp = lambda hw: (hw & 0xFF00) == 0x2800 | (i << 8)     # noqa: E731
-        if (before[0] & 0xFF00) in (0xD800, 0xD200) and cmp(before[1]):
-            n = (before[1] & 0xFF) + (1 if (before[0] & 0xFF00) == 0xD800 else 0)
-        elif (before[0] & 0xF800) == 0xE000 and before[1] in (0xD900, 0xD300) and cmp(before[2]):
-            n = (before[2] & 0xFF) + (1 if before[1] == 0xD900 else 0)
-        else:
-            return None
-        base = start + 2 + 4 + ((ld >> 6) & 0x1F) * 2
-        ts = next((s for s in self.segs_for(base, seg) if s.contains(base, 2 * n)), None)
-        if ts is None:
-            return None
-        at = jmp + 4
-        out = []
-        for e in range(n):
-            off = ts.u16(base + 2 * e)
-            out.append(((at + off - (0x10000 if off & 0x8000 else 0)) & 0xFFFFFFFF, True))
-        return out
-
-    @staticmethod
-    def _bound(recent, i, r):
-        """n from the cmp r, #n shortly before recent[i], if nothing in between writes r."""
-        for prev in reversed(recent[max(0, i - 6):i]):
-            if prev.thumb:
-                return None
-            w = prev.word
-            if (w & 0x0FF0F000) == 0x03500000 and ((w >> 16) & 0xF) == r:
-                imm = w & 0xFF
-                rot = ((w >> 8) & 0xF) * 2
-                n = ((imm >> rot) | (imm << (32 - rot))) & 0xFFFFFFFF if rot else imm
-                return n if n <= 1024 else None
-            wr = arm_writes(w)
-            if wr is None or r in wr:
-                return None
-        return None
-
-    def _const(self, seg, recent, i, r):
-        """The value r holds at recent[i], when the last write to it was a literal load
-        (ldr r, [pc, #imm]) or an adr (add/sub r, pc, #imm)."""
-        for prev in reversed(recent[max(0, i - 32):i]):
-            if prev.thumb:
-                return None
-            w = prev.word
-            wr = arm_writes(w)
-            if wr is None:
-                return None
-            if r not in wr:
-                continue
-            if (w >> 28) != 0xE or ((w >> 12) & 0xF) != r or wr != {r}:
-                return None
-            if (w & 0x0F7F0000) == 0x051F0000:              # ldr r, [pc, #+-imm]
-                lit = (prev.addr + 8 + ((w & 0xFFF) if w & (1 << 23) else -(w & 0xFFF))) & 0xFFFFFFFF
-                s = next((s for s in self.segs_for(lit, seg) if s.contains(lit, 4)), None)
-                return s.u32(lit) if s is not None else None
-            if (w & 0x0FEF0000) in (0x028F0000, 0x024F0000):  # add/sub r, pc, #imm
-                imm = w & 0xFF
-                rot = ((w >> 8) & 0xF) * 2
-                imm = ((imm >> rot) | (imm << (32 - rot))) & 0xFFFFFFFF if rot else imm
-                return (prev.addr + 8 + (imm if (w & 0x01E00000) == 0x00800000 else -imm)) & 0xFFFFFFFF
-            return None
-        return None
 
     # -- C output ------------------------------------------------------------
     def _disasm(self, ins):
@@ -567,6 +456,7 @@ class Program:
             with open(path, 'w') as f:
                 f.write('\n'.join(out) + '\n')
         self._emit_table(outdir, names, table)
+        self._emit_pic(outdir)
         return funcs
 
     def _emit_function(self, e, body, labels, fn, table):
@@ -634,6 +524,53 @@ class Program:
             return ['{'] + ['    ' + l for l in code] + ['}']
         return code
 
+    def _compile_pic(self, name, data):
+        """The C lines of a stub that runs wherever its bytes are, or None (and a warning)
+        when it can't: its instructions must give the same code at two different addresses
+        (nothing reads the pc, nothing branches relative to it) and the last is the only
+        jump, to a register."""
+        why = None
+        if not data or len(data) % 4:
+            why = 'not whole ARM instructions'
+        words = struct.unpack(f'<{len(data) // 4}I', data) if why is None else ()
+        lines = []
+        for k, w in enumerate(words):
+            a = (0x02000000 + 4 * k, 0x02444440 + 4 * k)
+            ins, other = (decode_arm(x, w, self.arch) for x in a)
+            last = k == len(words) - 1
+            if (ins.code, ins.cond, ins.flow) != (other.code, other.cond, other.flow):
+                why = f'{w:08x} depends on its address'
+            elif ins.flow != ('ret' if last else 'seq') or last and ins.cond:
+                why = f'{w:08x} is a {ins.flow} where {"the jump" if last else "straight-line code"} belongs'
+            if why:
+                break
+            lines.append(f'    /* {self._disasm(ins)} */')
+            lines += ['    ' + l for l in self._emit_insn(-1, ins, False, set())]
+        if why:
+            self.warnings.append(f'{name}: not position-independent: {why}')
+            return None
+        return [f'    c->budget -= {len(words)};'] + lines
+
+    def _emit_pic(self, outdir):
+        """The position-independent stubs: one function each, and a table of their bytes
+        for the dispatcher, which runs the one whose bytes it finds in memory at an address
+        nothing was compiled for. Longer stubs first, for one that is a prefix of another."""
+        out = [f'/* generated by dsnative recomp: {self.prefix} position-independent stubs */', '#include "dsr.h"', '']
+        stubs = []
+        for i, (name, data) in enumerate(self.pic):
+            body = self._compile_pic(name, data)
+            if body is not None:
+                fn = f'{self.prefix}_pic{i}'
+                out += [f'/* {name} */', f'static const u8 {fn}_bytes[] = {{{", ".join(str(b) for b in data)}}};',
+                        f'static u32 {fn}(Cpu *c, u32 pc) {{'] + body + ['}', '']
+                stubs.append((len(data), fn))
+        out.append(f'const PicEntry {self.prefix}_pic[] = {{')
+        for n, fn in sorted(stubs, key=lambda s: -s[0]):
+            out.append(f'    {{{n}, {fn}_bytes, {fn}}},')
+        out += ['    {0, 0, 0}', '};', f'const u32 {self.prefix}_pic_len = {len(stubs)};']
+        with open(os.path.join(outdir, f'{self.prefix}_pic.c'), 'w') as f:
+            f.write('\n'.join(out) + '\n')
+
     def _emit_table(self, outdir, names, table):
         seen = set()
         uniq = []
@@ -667,4 +604,6 @@ class Program:
         walked = {k for k in self._visited | self._spec_visited if self.insns.get(k) is not None}
         return {'functions': len(self.entries), 'instructions': len(walked), 'thumb': sum(1 for k in walked if k[2]),
                 'from_candidates': len(walked - self._visited), 'labels': len(self.resume),
-                'rejected_candidates': len(self.rejected)}
+                'rejected_candidates': len(self.rejected), 'tables': len(self.extra_targets),
+                'cases': sum(len(v) for v in self.extra_targets.values()),
+                'unbounded': sum(1 for v in self._jumps.values() if v == 'unbounded')}

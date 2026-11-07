@@ -299,6 +299,26 @@ static const DispatchEntry *lookup(Cpu *c, u32 key) {
     return 0;
 }
 
+/* Code with no address of its own (see PicEntry): the stub whose bytes are in memory at pc.
+ * Only RAM the CPU reads directly is looked at: a stray jump must not read I/O registers. */
+static const PicEntry *lookup_pic(Cpu *c, u32 pc) {
+    if (c->t || (pc & 3)) return 0;
+    for (u32 i = 0; i < c->pic_len; i++) {
+        const PicEntry *p = &c->pic[i];
+        u32 n = 0;
+        for (; n < p->len; n += 4) {
+            u32 a = pc + n, v, w;
+            const u8 *page = a >= pc && a < 0x10000000u ? c->rp[a >> PAGE_SHIFT] : 0;
+            if (!page) break;
+            memcpy(&v, page + (a & 0xFFF), 4);
+            memcpy(&w, p->bytes + n, 4);
+            if (v != w) break;
+        }
+        if (n == p->len) return p;
+    }
+    return 0;
+}
+
 static void enter_irq(Cpu *c) {
     u32 cpsr = dsr_cpsr(c);
     u32 ret = c->r[15];
@@ -373,6 +393,12 @@ s32 dsr_run(Cpu *c, s32 cycles) {
         if (in_bios(c, pc)) { if (!bios_exec(c) && !c->halted) break; continue; }
         const DispatchEntry *e = lookup(c, pc | c->t);
         if (!e) {
+            const PicEntry *p = lookup_pic(c, pc);
+            if (p) {
+                c->dispatches++;
+                c->r[15] = p->fn(c, pc);
+                continue;
+            }
             c->misses++;
             c->last_miss = pc | c->t;
             if (c->log_miss) c->log_miss(c, pc, c->t);
