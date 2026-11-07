@@ -1,0 +1,11 @@
+# tests/hw/sound_7.c and sound_9.c. The run records what it mixes to build/hwtest/out/sound.wav.
+args: --wav sound.wav
+# a one-shot PCM16 sound's busy bit, timed on the ARM7
+sound_pcm ok
+# PSG duty 1 captured from the right mixer: 4 HIGH (7FFFh), 12 LOW (-7FFFh), repeating every 8 samples
+sound_psg 00010c04
+# 4000h at volume 64, divider 2, panned left, captured from the left mixer
+sound_capture 10001000
+# SWI 1Bh and 1Ch: pitch table entries FF8Ah (the last, GBATEK) and 6A0Ah (a half octave, sqrt 2),
+# volume table entries 7Fh (0 dB) and 0; SWI 08h to bias 200h and then 0
+sound_bios 0000ff8a 00006a0a 0000007f 00000000 00000200 00000000

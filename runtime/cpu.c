@@ -190,6 +190,47 @@ static u32 isqrt(u32 v) {
     return r;
 }
 
+/* exp(x) without libm (the generated build and tests/difftest.py link cpu.c alone): halve x
+ * into the series' range, sum the Taylor series and square back. */
+static double bios_exp(double x) {
+    int n = 0;
+    while (x > 0.5 || x < -0.5) { x /= 2; n++; }
+    double term = 1, sum = 1;
+    for (int k = 1; k < 24; k++) { term *= x / k; sum += term; }
+    while (n--) sum *= sum;
+    return sum;
+}
+
+/* The ARM7 BIOS's sound tables, which the SDK's sound driver reads with SWI 1Bh and 1Ch
+ * (GBATEK "DS BIOS Sound Functions"). Generated from what they hold, not stored:
+ *  - pitch, 768 entries (12 semitones of 64 steps): 2^(i/768) as 16.16 fixed point, less the
+ *    1.0, rounded to nearest (the last entry is FF8Ah, as GBATEK says; rounding down gives FF89h);
+ *  - volume, 724 entries: i - 723 is a level in tenths of a decibel (the SDK's -723 to 0), the
+ *    amplitude 127 * 10^(dB / 200) rounded to nearest, scaled up by the divider the driver
+ *    then sets in SOUNDxCNT, which it picks from the same level: 16 (the hardware's Div16)
+ *    below -240, 4 below -120, 2 below -60, else 1. Each range so ramps from 32 or 64 to 127
+ *    and the channel's volume divider scales it back.
+ * Outside the tables GBATEK says "garbage" (what follows them in the ROM): this returns 0. */
+#define BIOS_PITCH_LEN 768
+#define BIOS_VOLUME_LEN 724
+static u32 bios_sound_table(int volume, u32 i) {
+    static u16 pitch[BIOS_PITCH_LEN];
+    static u8 vol[BIOS_VOLUME_LEN];
+    static int ready;
+    const double ln2 = 0.6931471805599453, ln10 = 2.302585092994046;
+    if (!ready) {
+        for (int k = 0; k < BIOS_PITCH_LEN; k++) pitch[k] = (u16)((u32)(65536.0 * bios_exp(k * ln2 / BIOS_PITCH_LEN) + 0.5) - 65536u);
+        for (int k = 0; k < BIOS_VOLUME_LEN; k++) {
+            int db = k - 723;
+            double div = db < -240 ? 16 : db < -120 ? 4 : db < -60 ? 2 : 1;
+            vol[k] = (u8)(127.0 * div * bios_exp(db * ln10 / 200.0) + 0.5);
+        }
+        ready = 1;
+    }
+    if (volume) return i < BIOS_VOLUME_LEN ? vol[i] : 0;
+    return i < BIOS_PITCH_LEN ? pitch[i] : 0;
+}
+
 #define BIOS_INTRWAIT 0x300u
 
 u32 dsr_swi(Cpu *c, u32 num, u32 next) {
@@ -213,6 +254,18 @@ u32 dsr_swi(Cpu *c, u32 num, u32 next) {
     case 0x07:  /* Sleep (ARM7) */
         c->halted = 1;
         return next;
+    case 0x08: { /* SoundBias (ARM7): SOUNDBIAS to 0 (r0 = 0) or 200h in steps of 1, r1 delay loops per step */
+        if (c->arch == 5) goto unimplemented;
+        u32 cur = rd16(c, 0x04000504), tgt = c->r[0] ? 0x200 : 0, lo = cur & 0x3FF;
+        c->write_slow(c, 0x04000504, (cur & ~0x3FFu) | tgt, 2);     /* the upper bits stay */
+        c->budget -= (s32)((lo > tgt ? lo - tgt : tgt - lo) * (c->r[1] * 4 + 12));
+        return 0;
+    }
+    case 0x1B:  /* GetPitchTable (ARM7) */
+    case 0x1C:  /* GetVolumeTable (ARM7) */
+        if (c->arch == 5) goto unimplemented;
+        c->r[0] = bios_sound_table(num == 0x1C, c->r[0]);
+        return 0;
     case 0x09: { /* Div */
         s32 n = (s32)c->r[0], d = (s32)c->r[1];
         if (d == 0) { c->r[0] = n < 0 ? (u32)-1 : 1; c->r[1] = (u32)n; c->r[3] = 1; return 0; }
@@ -263,6 +316,7 @@ u32 dsr_swi(Cpu *c, u32 num, u32 next) {
         c->halted = 1;
         return next;
     default:
+    unimplemented:
         fprintf(stderr, "[ARM%d] BIOS call %02x is not implemented (r0=%08x r1=%08x r2=%08x)\n", c->arch == 5 ? 9 : 7, num, c->r[0], c->r[1], c->r[2]);
         return 0;
     }
