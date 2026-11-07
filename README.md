@@ -36,10 +36,12 @@ advantages of native execution:
 | Overlays sharing an address | handled: each candidate is checked against memory at run time |
 | Runtime: dispatcher, CPU modes and banked registers, interrupts, BIOS (high-level), CP15, TCM | done |
 | DS hardware: memory map, VRAM banks, DMA, timers, IPC sync and FIFOs, divider, square root, cartridge reads, SPI (power, firmware, touch), keypad | done for what homebrew uses |
-| 2D engines: text, affine and bitmap backgrounds, sprites, blending, master brightness, VRAM display | done (no windows, mosaic, bitmap sprites yet) |
+| 2D engines: text, affine and bitmap backgrounds, sprites, blending, master brightness, VRAM display, the 3D layer as BG0 | done (no windows, mosaic, bitmap sprites, display capture yet) |
 | RTC (ARM7): serial protocol, status, date and time (BCD, 12/24-hour), alarms, frequency, adjust and free registers, reset, /INT through RCNT; starts at host time or `--rtc`, runs on emulated time | done |
 | Save memory: EEPROM, FLASH and FRAM on the cartridge SPI bus, save file on disk; the chip comes from `--save-type`, a game-code table, a save file's size, else FLASH 512 KB with a note on stderr | done |
-| 3D engine, sound, Wi-Fi | not started |
+| Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, mixer at 32768 Hz into a ring for the app, ARM7 BIOS sound calls | done; Pokémon Black 2's sound driver runs |
+| 3D engine (first cut): geometry engine (command FIFO and ports, GXSTAT, matrix stacks, clipping, box/position/vector tests, geometry FIFO DMA) and an untextured software rasterizer (Z or W buffer, Gouraud, alpha, wire frames) feeding engine A's BG0; no textures, toon, fog, edge marking or anti-aliasing yet | done for the geometry side, first cut for rendering |
+| Wi-Fi | not started |
 | Apple app shell (Metal, controllers, touch, two screens) | not started |
 
 ## Try it

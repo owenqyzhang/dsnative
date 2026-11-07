@@ -214,6 +214,60 @@ counted as one cycle each for now.
   code, which touches the recompiler and is left as future work.
 - **Direct boot**: the binaries in RAM, the header and chip IDs where the firmware puts them,
   the firmware user settings, registers and stacks.
+- **Sound** (`runtime/sound.c`, ARM7): the 16 channels (PCM8, PCM16, IMA-ADPCM; PSG squares on
+  8-13, noise on 14-15), the two capture units and the mixer, as GBATEK "DS Sound" describes
+  them. The sound runs lazily, to the machine's time (`Nds.time`, ARM7 bus cycles) at the end of
+  each scanline and before every access to its registers, so the busy bit a one-shot clears at
+  the start of its last sample, which the SDK polls, is as current as the ARM7's 256-cycle time
+  slice. A channel only changes output when its timer overflows, so channels are stepped one at a
+  time between the instants something looks at them: a mixed frame or a capture. The mixer keeps
+  the hardware's bit widths (volume 16.11, panning 16.8, mixer 20.8, master volume, bias, a
+  10-bit clip) and is point-sampled at 32768 Hz of emulated time into a ring of 8192 stereo s16
+  frames. `nds_audio_take(s, out, max_frames)` drains it for the app; frames nobody takes are
+  dropped, oldest first. Headless `--wav PATH` records every mixed frame to a WAV, finished in
+  `nds_shutdown`. The ARM7 BIOS's sound calls are high level too: SWI 08h
+  SoundBias, 1Bh GetPitchTable and 1Ch GetVolumeTable. The two tables are generated at first use
+  from what they hold, not stored: the pitch table is 2^(i/768) as 16.16 fixed point less 1.0,
+  and the volume table is 127 * 10^(dB/200) for a level of (i - 723) tenths of a dB. The SDK's
+  driver sets a channel's volume divider from the same level (Div16 below -240, Div4 below -120,
+  Div2 below -60), so the table holds the amplitude scaled up by that divider and ramps from 32
+  or 64 to 127 in each range. `cpu.c` computes them with its own exp() because difftest and the
+  generated build link it without libm. The table tests check the code against these formulas,
+  not against a real BIOS.
+- **3D engine** (`runtime/gpu3d.c`, `runtime/gpu3d_render.c`; ARM9 0x04000060 and
+  0x04000320-0x040006A3). The geometry engine takes commands from GXFIFO (packed words of up to
+  four commands, then their parameters) and from the direct ports at 0x04000440-0x040005CC. A
+  command runs as soon as its parameters are in, with no latency; its cycle cost only extends how
+  long GXSTAT reports busy (box/position/vector tests and stack operations have their own busy
+  bits). The FIFO holds entries only while a command waits for parameters and while SWAP_BUFFERS
+  halts the engine until VBlank. GXSTAT shows its level (the 4-entry pipe not counted), the
+  under-half and empty bits and the FIFO interrupt as a level condition, and geometry FIFO DMA
+  (ARM9 timing 7, `nds_gxfifo_dma` in nds.c) sends 112-word bursts only while the FIFO is under
+  half full. The queue takes 16384 entries and the CPU never stalls on it. Matrices are 4x4 of
+  20.12, row vectors, with the 64-bit accumulate and a single arithmetic shift per element;
+  projection and texture stacks are one deep, position and vector stacks 31 with a 6-bit
+  pointer, and overflow sets GXSTAT bit 15. The clip matrix (position * projection) is built
+  lazily. Polygons are assembled from triangles, quads and strips, culled by facing, clipped
+  against all six planes of the view volume (new vertices interpolate colour and texture
+  coordinates), put through the viewport, and stored in one of two polygon/vertex RAM sets (2048
+  polygons, 6144 vertices; strip vertices are shared until a clip separates them). A polygon
+  that clips to more than 10 vertices (a twisted quad) is dropped, since the hardware's
+  behaviour for it is undocumented. SWAP_BUFFERS exchanges the sets at VBlank; its sort and W
+  bits apply to the commands after the swap. Lighting follows GBATEK but has no tests yet. The
+  rasterizer draws the whole frame at line 262 into a 256x192 buffer of 6-bit colour and 5-bit
+  alpha with a 24-bit Z or W buffer, scanline by scanline: the rear plane, then opaque polygons
+  in the order sent, then translucent ones (sorted by Y unless the swap asked for manual order;
+  GBATEK gives no rule, so this is a guess). A pixel is drawn when its centre is inside the
+  polygon; polygons with no area on screen (lines, dots) draw their whole run, and polygons
+  whose bounding box is at most 1x1 draw as one pixel. Colour and W are interpolated
+  perspective-correctly, Z linearly. Alpha blending follows the 3D engine's formula, with the
+  translucent polygon-ID rule (a translucent pixel does not draw over one with the same ID) and
+  bit 11 deciding whether it writes depth; wire frames are alpha 0. This first cut is
+  untextured: every polygon takes its colour from its vertices. The frame is engine A's BG0 when
+  DISPCNT bit 3 is set (and POWCNT1 bit 3): BG0HOFS scrolls a 512-pixel region (the image, then
+  256 transparent pixels), BG0CNT gives the priority, and with BLDCNT's alpha effect, BG0 as
+  first target and a second target below it, a translucent pixel blends by its own alpha (EVA =
+  A/2, EVB = 16 - A/2, which GBATEK itself marks as a guess), while alpha 31 stays whole.
 - **2D engines**, one scanline at a time: text, affine, extended affine and bitmap
   backgrounds, regular and affine sprites, priorities, alpha blending, brightness effects,
   master brightness and VRAM display mode.
@@ -231,14 +285,17 @@ What a Nitro SDK game needs that homebrew doesn't, roughly in the order a game h
 - **Save memory**: done (see above). Pokémon Black 2 uses 512 KB of FLASH.
 - **RTC**: done (see above). Pokémon's ARM7 uses the SDK's RTC routine, which bit-bangs the
   register with the sequence the unit tests use.
-- **Sound**: the 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, and mixing to
-  32 kHz. The ARM7's sound driver only programs these registers.
-- **3D**: the geometry engine (matrix stacks, lighting, the command FIFO and its DMA, box and
-  position tests) and the rasterizer (textures, toon/highlight, fog, edge marking,
-  anti-aliasing, alpha), feeding the 2D engine's BG0. A software rasterizer comes first, then
-  Metal. Pokémon Black 2's overworld is 3D.
-- **The rest of the 2D engines**: windows, mosaic, bitmap sprites, the large bitmap mode,
-  main-memory display, display capture (used for motion blur and dual-screen 3D).
+- **Sound**: done (see above): the 16 channels, capture, and mixing to 32768 Hz into a ring for
+  the app (`nds_audio_take`), plus the ARM7 BIOS sound calls. The Apple app's AVAudioEngine only
+  has to drain the ring.
+- **3D**: the geometry engine and an untextured software rasterizer are done as described
+  above. What remains: textures (Pokémon Black 2 sets TEXIMAGE_PARAM on most of its geometry),
+  toon/highlight shading, fog, edge marking, anti-aliasing, shadow polygons, the rear-plane
+  bitmap, a faster or Metal rasterizer.
+- **The rest of the 2D engines**: display capture first: Black 2 shows its 3D scenes by
+  capturing engine A's output (DISPCAPCNT) into VRAM bank D and displaying that bank with the
+  VRAM display mode, so none of its 3D reaches the screen without it. Then windows, mosaic,
+  bitmap sprites, the large bitmap mode and main-memory display.
 - **Wi-Fi**: enough register stubs for the SDK to initialize and report no network.
 - **Game profiles**: per game (by game code and revision), the extra entry points, known
   data-in-code regions and patches. Like nxnative's `dm/games/<id>/`.
