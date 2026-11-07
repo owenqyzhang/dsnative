@@ -24,18 +24,27 @@ Code is found by walking it from the entry points:
 - **Indirect calls** (BLX reg, and the ARMv4 `mov lr, pc` before `bx`/`ldr pc`) leave to a
   computed address. The next instruction is a return site. When the register was loaded from
   a literal (`ldr r3, =main; blx r3`, as crt0 calls `main`), its value is a function entry.
-- **Jump tables**: `add pc, pc, rN, lsl #2` (a table of branches) and `ldr pc, [pc, rN, lsl #2]`
-  (a table of addresses), bounded by the `cmp rN, #n` just before; and GCC 15's form, where
-  `ldrb rN, [rT, rI]` (or `ldrh` of a doubled index) reads the case's offset in words from a
-  table in rodata just before the `add pc`, bounded by `cmp rI, #n`. A `cmp` only bounds a
-  table when nothing between it and the jump writes the register. An `add pc, pc, rN, lsl #2`
-  nothing bounds lands somewhere in what follows: in a run of branches (a table), or in
-  straight-line code (an unrolled loop entered part way, as the SDK's division does), where
-  every instruction to the end of the run becomes a label.
-- **Thumb switches** (CodeWarrior): `adds r, s, s; add r, pc; ldrh r, [r, #k]; lsls; asrs;
-  add pc, r`, a table of signed halfword offsets after the `add pc`, bounded by `cmp s, #n`
-  and a `bhi`/`bcs` just before, or a `bls`/`bcc` over a `b default`. The whole pattern is
-  read from memory, so it doesn't matter which walk reaches the `add pc`.
+- **Jump targets** (`recomp/jumps.py`): a computed jump is read by an evaluator, not a matcher
+  per encoding. It takes the straight path of instructions before the jump and runs it
+  symbolically. The guards on the path (a `cmp` and the branch after it, or a `bls`/`bhi` over
+  a `b default`, in ARM and Thumb) bound the index; the evaluator then runs the path once per
+  value of the index and reads each case's target from the memory image. A table of branches,
+  of words, of byte or halfword offsets, a CodeWarrior Thumb switch and GCC 15's address table
+  (ARMv4T Thumb: `ldr`, then `mov pc`) all come out as one list of (address, Thumb) cases, one
+  per index value in increasing order. A constant (`ldr r3, =main; blx r3`) is a function
+  entry. All of it is read from memory, so it doesn't matter which walk reaches the jump.
+- **What bounds a table**: a call on the path is a join, so a bound from before it doesn't bound
+  the table after it, unless nothing else does. The path is read twice: first with no
+  assumptions, then with the assertion reading, which treats a call that the branch before it
+  skips as one that never returns (`cmp r0, #2; bls 1f; bl panic; 1:`); the second reading can
+  only bound a table the first left unbounded. Tests for equality (a zero check before the
+  switch) cut no case out of a table: they hold only if the branch is the one way into the
+  code, which the path can't tell, and a case kept in costs only code size. A loop's head is a
+  join whose back edge comes after the jump, so a run that is infeasible, or finds no table
+  where only a table explains the jump, restarts the path later.
+- **Unbounded `add pc, pc, rN, lsl #2`** lands in a run of branches (a table) or in straight-line
+  code (an unrolled loop entered part way, as the SDK's division is), and every instruction to
+  the end of the run becomes a label. Any other jump without a bound is reported as a warning.
 - **Saved contexts**: an ARM `adr rN, x` makes `x - 4` a label when it is code. The Nitro OS
   saves a thread's resume point that way (`OS_SaveContext` stores its own `bx lr` + 4) and
   resumes it with `subs pc, lr, #4`.
@@ -49,23 +58,41 @@ Code is found by walking it from the entry points:
   only from candidates is speculative. Only certain code hides a word from the data scan: a
   candidate that is really data (a string at an odd address reads as plausible Thumb code)
   can walk on through a table of function pointers, and the table must still be scanned.
-  Certain walks run first, so they see each function from its start, with the `cmp` before
-  a jump table, before a candidate lands in the middle of it.
+  Certain walks run first, so they see each function from its start before a candidate lands
+  in the middle of it.
+- **Addresses several segments share** (overlays loaded at one address, or a stub and the
+  autoload copied over it): a call, a branch or a constant call there enters each of those
+  segments, and each walk is speculative, because at most one of them is the code that runs and
+  the others hold other overlays' code or data. Data decodes as code (a table of function
+  pointers reads as `andeq r0, r0, #imm`, which as certain code would cover its own words and
+  hide its pointers from the scan). Each segment still becomes an entry and is compiled, and
+  code at such an address is checked against memory when dispatched. A call or branch inside
+  the caller's own segment stays in it (an overlay is loaded while its own code runs), and one
+  into an address only one segment covers stays certain. In Black 2 almost all ARM9 code is
+  reached this way: 1,639,878 of 1,674,047 walked instructions come from candidates and 34,169
+  are certain, because 344 overlays share addresses.
 - **Feedback**: when the runtime reaches an address nothing was compiled for, it stops and
   appends the address to `missing.txt`. `--extra missing.txt` adds it to the next build. The
   game profile (planned) keeps such entries per game.
 
 Segments are the ARM9 and ARM7 static images, each autoload segment at its destination (ITCM,
 DTCM, ARM7 WRAM, other RAM; SDK 5 lists them in four-word entries), each start-up stub at the
-address crt0 copies it to, and each overlay at its load address. A call, branch or pointer to
-an address in its own segment stays in it: an overlay is loaded while its own code runs. One
-into an address several segments share becomes an entry in each of them, and code at such
-an address is checked against memory when dispatched.
+address crt0 copies it to, and each overlay at its load address.
 
 Start-up stubs are code crt0 copies to fast memory and calls before the autoloads overwrite
 it: in SDK 5 the two CPUs' handshake, run from ITCM and from ARM7 WRAM (the reader finds the
-`ldr r1, =src; ldr r2, =dst; add r3, r2, #n` copy loop). The ARM7's last step is a two-word
-trampoline it copies to its own stack and jumps to; nothing finds that one yet.
+`ldr r1, =src; ldr r2, =dst; add r3, r2, #n` copy loop).
+
+Position-independent stubs: SDK 5's ARM7 crt0 copies its last two words (`strh r2, [r1]; bx r0`)
+to its own stack and jumps to them, so the code has no address. The ROM reader runs the
+straight-line code before each `bx rN` with what it loads from the image known and the stack as
+offsets from sp, finds the copy, and returns the words as a stub of kind `pic`, which is not a
+segment. The recompiler turns each into a function of its own, accepted only if its
+instructions read no address (it decodes them at two addresses and compares: a pc read, a
+literal load or a branch makes the code differ) and it ends in one unconditional register
+jump, and writes the functions and their bytes to `g9_pic.c` / `g7_pic.c`, longest first. On a
+dispatch miss the dispatcher runs the stub whose bytes are in RAM at `pc`. `ndsinfo --code`
+lists these stubs and the jump table counts.
 
 ### Grouping and C output
 
@@ -154,6 +181,37 @@ counted as one cycle each for now.
   redirection below 0x8000.
 - **SPI** (ARM7): the power manager, the firmware flash (with generated user settings) and the
   touch screen controller.
+- **RTC** (`runtime/rtc.c`, ARM7 0x04000138): the Seiko S-35180, a 3-wire serial clock the ARM7
+  bit-bangs. CS rising starts a transfer. The chip reads SIO on each rising SCK edge (a command
+  byte with fixed code 0110, a 3-bit command and the read/write bit, then the parameters, all
+  LSB first). When reading, it drives SIO from each falling edge: the Nitro SDK samples while
+  SCK is still low, GBATEK's flowchart once SCK is high again, and both see the same bit. SIO is
+  modelled as open drain. The registers are status 1 and 2 (reset, 12/24-hour mode, flags
+  cleared on read, the INT1 mode and INT2 enable), date and time in BCD (12-hour mode counts
+  0-11 with a PM bit), time only, both alarms, the INT1 frequency register (the same byte as
+  alarm 1's minute), clock adjustment and the free register. Where GBATEK leaves something
+  open, the S-35190A datasheet decides: invalid writes are corrected as it describes, reset
+  keeps the 12/24-hour and general-purpose bits written along with it, a read captures its data
+  when the command arrives, and a bad command byte is skipped. The clock starts at the host's
+  local time, or at `--rtc YYYY-MM-DDTHH:MM:SS`, and advances with emulated time (`s->time`,
+  33,513,982 bus cycles a second), not wall time, so a headless run is reproducible. Day of
+  week counts from Sunday = 0, as the SDK does. The /INT output (alarms, per-minute edge and
+  steady modes, the selected 1-16 Hz frequencies combined, 32 kHz as one interrupt a scanline)
+  is the SI input of RCNT: `rtc_line`, called every scanline, raises ARM7 interrupt bit 7 on a
+  falling edge when RCNT is in general-purpose mode with the SI interrupt enabled.
+- **Save memory** (`runtime/save.c`, AUXSPICNT/AUXSPIDATA on whichever CPU EXMEMCNT gives the
+  slot): EEPROM, FLASH and FRAM chips, kept in a save file (`--save PATH`, written at exit if it
+  changed). The cartridge header doesn't say which chip a game has, so `save.c` picks it at the
+  chip's first use, once all options are in: `--save-type`, then a table of game codes (Pokémon
+  Black 2 and White 2 among them), then the size of the `--save` file if it equals a chip's size,
+  then FLASH 512 KB. The last step is a guess, and the runtime says so on stderr, with how to
+  override it. A game whose chip differs from the guess sends commands the model takes
+  differently (EEPROM addresses of 1 or 2 bytes versus FLASH's 3, `02h` as write versus
+  program), so its save won't work until the type is given. There is no automatic detection:
+  GBATEK's way counts the bytes a game sends from the same program counter, and recompiled
+  code has no program counter at an I/O access (`Cpu.r[15]` only holds where the current
+  dispatch entered). Making it work would mean tracking the guest PC at I/O writes in generated
+  code, which touches the recompiler and is left as future work.
 - **Direct boot**: the binaries in RAM, the header and chip IDs where the firmware puts them,
   the firmware user settings, registers and stacks.
 - **2D engines**, one scanline at a time: text, affine, extended affine and bitmap
@@ -170,9 +228,9 @@ Recompiler, runtime and the homebrew end-to-end test.
 
 What a Nitro SDK game needs that homebrew doesn't, roughly in the order a game hits it:
 
-- **Save memory** on the cartridge SPI bus: EEPROM and FLASH (Pokémon Black 2 uses 512 KB of
-  FLASH), with a save file on disk.
-- **RTC**: the bit-banged serial clock on the ARM7. Pokémon reads the date and time.
+- **Save memory**: done (see above). Pokémon Black 2 uses 512 KB of FLASH.
+- **RTC**: done (see above). Pokémon's ARM7 uses the SDK's RTC routine, which bit-bangs the
+  register with the sequence the unit tests use.
 - **Sound**: the 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, and mixing to
   32 kHz. The ARM7's sound driver only programs these registers.
 - **3D**: the geometry engine (matrix stacks, lighting, the command FIFO and its DMA, box and

@@ -9,8 +9,9 @@ source and linked with a runtime that stands in for the DS hardware. Nothing is 
 the game runs, so it works where apps can't JIT (iOS, iPadOS and tvOS without a debugger
 attached).
 
-This is a proof of concept. It runs homebrew from start to finish. Commercial games don't boot
-yet: see [Status](#status) and [the roadmap](docs/design.md#roadmap).
+This is a proof of concept. It runs homebrew from start to finish. A commercial game (Pokémon
+Black 2) now runs through boot on both CPUs and on to its first screens, but its 3D and sound
+aren't implemented yet: see [Status](#status) and [the roadmap](docs/design.md#roadmap).
 
 Nothing from any game is in this repository. You bring your own dumps.
 
@@ -31,12 +32,14 @@ advantages of native execution:
 |---|---|
 | ROM reader: header, ARM9/ARM7, Nitro SDK module parameters (to SDK 5), BLZ, autoloads on both CPUs, overlays, file system | done |
 | Recompiler: ARMv5TE and ARMv4T, ARM and Thumb, to C | done; matches Unicorn's ARM946 on about 45,000 random snippets |
-| Code discovery: calls, branches, ARM and Thumb jump tables (GCC, CodeWarrior), interworking veneers, function pointers in literal pools and data, start-up stubs | done for the forms seen so far, plus a missing-code feedback loop |
+| Code discovery: calls, branches, jump targets read by a symbolic evaluator (GCC and CodeWarrior switches, ARM and Thumb), interworking veneers, function pointers in literal pools and data, start-up stubs, position-independent stubs found by content | done for the forms seen so far, plus a missing-code feedback loop |
 | Overlays sharing an address | handled: each candidate is checked against memory at run time |
 | Runtime: dispatcher, CPU modes and banked registers, interrupts, BIOS (high-level), CP15, TCM | done |
 | DS hardware: memory map, VRAM banks, DMA, timers, IPC sync and FIFOs, divider, square root, cartridge reads, SPI (power, firmware, touch), keypad | done for what homebrew uses |
 | 2D engines: text, affine and bitmap backgrounds, sprites, blending, master brightness, VRAM display | done (no windows, mosaic, bitmap sprites yet) |
-| 3D engine, sound, save memory, RTC, Wi-Fi | not started |
+| RTC (ARM7): serial protocol, status, date and time (BCD, 12/24-hour), alarms, frequency, adjust and free registers, reset, /INT through RCNT; starts at host time or `--rtc`, runs on emulated time | done |
+| Save memory: EEPROM, FLASH and FRAM on the cartridge SPI bus, save file on disk; the chip comes from `--save-type`, a game-code table, a save file's size, else FLASH 512 KB with a note on stderr | done |
+| 3D engine, sound, Wi-Fi | not started |
 | Apple app shell (Metal, controllers, touch, two screens) | not started |
 
 ## Try it
@@ -78,10 +81,16 @@ python3 -m recomp game.nds -o build/game --build
 cd build/game && ./dsn_headless ../../game.nds arm9.bin --frames 600 --png out.png --stats
 ```
 
-`ndsinfo` works on any DS ROM today. The recompiler and build run, but a commercial game stops
-early, at the first hardware the runtime doesn't implement yet. When it reaches code that
-discovery missed, the runtime appends the address to `missing.txt`. Pass that file back with
+`ndsinfo` works on any DS ROM today. The recompiler and build run, and a commercial game runs
+until the first hardware the runtime doesn't implement yet (3D and sound). When it reaches code
+that discovery missed, the runtime appends the address to `missing.txt`. Pass that file back with
 `--extra missing.txt` for the next build.
+
+Headless options: `--keys 100:a,105:` presses A at frame 100 and releases it at 105 (buttons
+`a b x y l r s e` for A, B, X, Y, L, R, Start and Select; `U D W E` for up, down, left and
+right), `--touch F:X:Y`, `--save PATH` keeps the save memory in a file (with `--save-type TYPE`
+when the game isn't in the built-in table of save chips: see the note the runtime prints), and
+`--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run.
 
 ## How it works
 
