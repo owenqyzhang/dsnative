@@ -196,6 +196,8 @@ class Rom:
     arm9_compressed: bool = False
     params: ModuleParams = None
     autoloads: list = field(default_factory=list)   # list of Segment (ARM9)
+    params7: ModuleParams = None
+    autoloads7: list = field(default_factory=list)  # list of Segment (ARM7)
     overlays9: list = field(default_factory=list)
     overlays7: list = field(default_factory=list)
     fat: list = field(default_factory=list)
@@ -244,6 +246,9 @@ class Rom:
         self.arm7 = d[h['arm7_rom']:h['arm7_rom'] + h['arm7_size']]
         self.arm9 = d[h['arm9_rom']:h['arm9_rom'] + h['arm9_size']]
         self._parse_arm9()
+        self.params7 = self._find_params(self.arm7)
+        if self.params7 is not None:
+            self.autoloads7 = self._parse_autoloads(7, self.arm7, h['arm7_ram'], self.params7)
         self._parse_fs()
         self.overlays9 = self._parse_ovt(h['ovt9_off'], h['ovt9_size'])
         self.overlays7 = self._parse_ovt(h['ovt7_off'], h['ovt7_size'])
@@ -281,18 +286,34 @@ class Rom:
             img = bytes(b)
             p.compressed_end = 0
         self.arm9 = img
-        # Autoload segments: a list of (destination, size, bss size) whose data is
-        # packed one after another from autoload_start.
+        self.autoloads = self._parse_autoloads(9, img, ram, p)
+
+    @staticmethod
+    def _parse_autoloads(cpu, img, ram, p):
+        """Autoload segments: a list of (destination, size, bss size) whose data is packed
+        one after another from autoload_start. SDK 5 entries have a fourth word,
+        (destination, size, ?, bss size); the third repeats the destination in the games
+        seen so far. The entry size is the one whose sizes add up to the packed data."""
+        out = []
         lst = p.autoload_list - ram
         lst_end = p.autoload_list_end - ram
         src = p.autoload_start - ram
         if 0 <= lst <= lst_end <= len(img) and 0 <= src <= len(img):
-            for i in range((lst_end - lst) // 12):
-                dest, size, bss = struct.unpack_from('<3I', img, lst + 12 * i)
+            step = 12
+            for n in (12, 16):
+                if (lst_end - lst) % n == 0 and \
+                        sum(u32(img, o + 4) for o in range(lst, lst_end, n)) == lst - src:
+                    step = n
+                    break
+            for i in range((lst_end - lst) // step):
+                e = struct.unpack_from(f'<{step // 4}I', img, lst + step * i)
+                dest, size, bss = e[0], e[1], e[-1]
                 if src + size > len(img) or size > 0x400000:
-                    raise RomError(f'autoload segment {i} ({dest:#x}, {size:#x} bytes) runs past the ARM9 image')
-                self.autoloads.append(Segment(f'autoload{i}@{dest:08x}', 9, dest, img[src:src + size], bss, 'autoload'))
+                    raise RomError(f'ARM{cpu} autoload segment {i} ({dest:#x}, {size:#x} bytes) runs past its image')
+                name = f'autoload{i}@{dest:08x}' if cpu == 9 else f'arm7_autoload{i}@{dest:08x}'
+                out.append(Segment(name, cpu, dest, img[src:src + size], bss, 'autoload'))
                 src += size
+        return out
 
     def _parse_fs(self):
         h = self.header
@@ -355,7 +376,10 @@ class Rom:
         """Every run of code the CPU can have, at its RAM address."""
         h = self.header
         if cpu == 7:
-            segs = [Segment('arm7', 7, h['arm7_ram'], self.arm7)]
+            static = self.arm7
+            if self.params7 is not None and self.params7.autoload_start:
+                static = static[:self.params7.autoload_start - h['arm7_ram']]
+            segs = [Segment('arm7', 7, h['arm7_ram'], static)] + self.autoloads7
             if overlays:
                 for ov in self.overlays7:
                     segs.append(Segment(f'ov7_{ov.id:03d}', 7, ov.ram_addr, self.overlay_image(ov), ov.bss_size, 'overlay', ov.id))

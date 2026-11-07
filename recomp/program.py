@@ -111,13 +111,13 @@ class Program:
 
     # -- segments ------------------------------------------------------------
     def segs_for(self, addr, from_seg=None):
-        """The segments a branch to addr can land in: the caller's own segment first, then
-        the non-overlay segments, then every overlay that covers it."""
+        """The segments a branch to addr can land in: the caller's own segment when it
+        covers addr (an overlay is loaded while its own code runs, and any overlay sharing
+        the address would have overwritten it), else the non-overlay segments, else every
+        overlay that covers it."""
         out = []
         if from_seg is not None and from_seg.contains(addr, 2):
-            out.append(from_seg)
-            if from_seg.kind != 'overlay':
-                return out
+            return [from_seg]
         for s in self.segs:
             if s.kind != 'overlay' and s.contains(addr, 2) and s not in out:
                 return out + [s]
@@ -145,8 +145,8 @@ class Program:
         return ins
 
     # -- discovery -----------------------------------------------------------
-    def add_entry(self, addr, thumb, seg=None, speculative=False):
-        segs = [seg] if seg is not None else self.segs_for(addr)
+    def add_entry(self, addr, thumb, seg=None, speculative=False, from_seg=None):
+        segs = [seg] if seg is not None else self.segs_for(addr, from_seg)
         added = []
         for s in segs:
             k = (s.index, addr, thumb)
@@ -218,7 +218,7 @@ class Program:
                 t = v & ~1
                 if not thumb and t & 3:
                     continue
-                for k in self.add_entry(t, thumb, speculative=True):
+                for k in self.add_entry(t, thumb, speculative=True, from_seg=seg):
                     found.append((k, True))
         return found
 
@@ -260,7 +260,7 @@ class Program:
                     self._literal_candidate(seg, lit, push)
                 if not thumb and ins.flow in ('ret', 'icall') and (ins.word & 0x0FFFFFD0) == 0x012FFF10:
                     # bx/blx rN after ldr rN, =f: f is code, as surely as this walk is
-                    v = self._const(recent, len(recent) - 1, ins.word & 0xF)
+                    v = self._const(seg, recent, len(recent) - 1, ins.word & 0xF)
                     if v is not None:
                         for ts in self.segs_for(v & ~1, seg):
                             tk = (ts.index, v & ~1, bool(v & 1))
@@ -308,7 +308,7 @@ class Program:
             a = v & ~1
             if not thumb and a & 3:
                 continue
-            for k in self.add_entry(a, thumb, speculative=True):
+            for k in self.add_entry(a, thumb, speculative=True, from_seg=s):
                 push(k, True)
             break
 
@@ -336,7 +336,7 @@ class Program:
                 return None     # base and index in one register: not a table
             if size:
                 n = self._bound(recent, at, ri)
-                base = self._const(recent, at, (load.word >> 16) & 0xF)
+                base = self._const(seg, recent, at, (load.word >> 16) & 0xF)
                 if n is None or base is None:
                     return None
                 ts = next((s for s in self.segs_for(base, seg) if s.contains(base, size * (n + 1))), None)
@@ -378,7 +378,7 @@ class Program:
                 return None
         return None
 
-    def _const(self, recent, i, r):
+    def _const(self, seg, recent, i, r):
         """The value r holds at recent[i], when the last write to it was a literal load
         (ldr r, [pc, #imm]) or an adr (add/sub r, pc, #imm)."""
         for prev in reversed(recent[max(0, i - 32):i]):
@@ -394,7 +394,7 @@ class Program:
                 return None
             if (w & 0x0F7F0000) == 0x051F0000:              # ldr r, [pc, #+-imm]
                 lit = (prev.addr + 8 + ((w & 0xFFF) if w & (1 << 23) else -(w & 0xFFF))) & 0xFFFFFFFF
-                s = next((s for s in self.segs_for(lit) if s.contains(lit, 4)), None)
+                s = next((s for s in self.segs_for(lit, seg) if s.contains(lit, 4)), None)
                 return s.u32(lit) if s is not None else None
             if (w & 0x0FEF0000) in (0x028F0000, 0x024F0000):  # add/sub r, pc, #imm
                 imm = w & 0xFF

@@ -148,6 +148,23 @@ def test_constant_branch_target_is_code():
     assert (0, BASE + 0x40, False) not in p.entries, 'an instruction word taken as a pointer'
 
 
+def test_overlay_call_stays_in_its_overlay():
+    """Two overlays share 0x02100000. The static code's call there could land in either;
+    overlay A's call into its own range can only land in A, which is loaded while it runs."""
+    ov = 0x02100000
+    p = Program([('arm9', BASE, arm(0xEB03FFFE, 0xE12FFF1E), 'static'),     # bl 0x02100000; bx lr
+                 ('ovA', ov, arm(0xE92D4000,        # push {lr}
+                                 0xEB000001,        # bl 0x02100010
+                                 0xE8BD8000,        # pop {pc}
+                                 0,
+                                 0xE3A00001, 0xE12FFF1E), 'overlay'),      # mov r0, #1; bx lr
+                 ('ovB', ov, arm(0xE3A00002, 0xE12FFF1E, 0, 0,
+                                 0xE3A00003, 0xE12FFF1E), 'overlay')], arch=5).discover([(BASE, False)])
+    assert (1, ov, False) in p.entries and (2, ov, False) in p.entries, 'static call into shared overlay space'
+    assert (1, ov + 0x10, False) in p.entries
+    assert (2, ov + 0x10, False) not in p.entries, "overlay A's own call taken into overlay B"
+
+
 def test_overwritten_index_is_no_bound():
     """A cmp of a register written again before the jump bounds nothing."""
     p = discover(image({

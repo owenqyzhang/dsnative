@@ -50,6 +50,7 @@ sudo apt install gcc-arm-none-eabi         # or: brew install --cask gcc-arm-emb
 
 python3 tests/difftest.py                  # the recompiler against Unicorn's ARM946
 python3 tests/test_discovery.py            # code discovery on small synthetic images
+python3 tests/test_rom.py                  # the ROM reader on synthetic images
 python3 tests/test_hw.py                   # build a homebrew ROM, recompile it, run it
 ```
 
@@ -110,6 +111,7 @@ the road to commercial games, an Apple app and the 3DS.
 | `runtime/` | the C runtime: CPU and dispatcher (`cpu.c`), the DS (`nds.c`), 2D (`gpu2d.c`), headless driver |
 | `tests/difftest.py` | differential test against Unicorn |
 | `tests/test_discovery.py` | code discovery cases the test ROM only hits with some layouts |
+| `tests/test_rom.py` | the ROM reader: module parameters and autoload lists of each SDK layout |
 | `tests/test_hw.py`, `tests/hw/` | the homebrew end-to-end test |
 
 ## Acknowledgements

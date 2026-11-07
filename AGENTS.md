@@ -9,6 +9,8 @@
     against Unicorn's ARM946. A semantic change needs a generator in it if none covers it.
   - `python3 tests/test_discovery.py`: code discovery on synthetic images, for cases that
     depend on how a toolchain lays out the test ROM. A discovery fix needs a case in it.
+  - `python3 tests/test_rom.py` after a change to `tools/nds.py`: module parameters and
+    autoload lists in each SDK's layout.
   - `python3 tests/test_hw.py`: the homebrew ROM end to end (suite output against the host,
     hardware results, screens in `build/hwtest/screen.png`).
 - Where DS hardware behaves differently from Unicorn (unaligned accesses force alignment on the

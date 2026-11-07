@@ -46,8 +46,9 @@ Code is found by walking it from the entry points:
   game profile (planned) keeps such entries per game.
 
 Segments are the ARM9 static image, each autoload segment at its destination (ITCM, DTCM, other
-RAM), each overlay at its load address, and the ARM7 image. A call from an overlay into an
-address covered by several overlays becomes an entry in each of them.
+RAM), each overlay at its load address, and the ARM7 image. A call, branch or pointer to an
+address in its own segment stays in it: an overlay is loaded while its own code runs. One into
+an address that only other overlays cover becomes an entry in each of them.
 
 ### Grouping and C output
 
