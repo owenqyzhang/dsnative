@@ -42,7 +42,7 @@ advantages of native execution:
 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, mixer at 32768 Hz into a ring for the app, ARM7 BIOS sound calls | done; Pokémon Black 2's sound driver runs |
 | 3D engine (first cut): geometry engine (command FIFO and ports, GXSTAT, matrix stacks, clipping, box/position/vector tests, geometry FIFO DMA) and an untextured software rasterizer (Z or W buffer, Gouraud, alpha, wire frames) feeding engine A's BG0; no textures, toon, fog, edge marking or anti-aliasing yet | done for the geometry side, first cut for rendering |
 | Wi-Fi | not started |
-| Apple app shell (Metal, controllers, touch, two screens) | not started |
+| Apple app shell: Swift package with Metal screens, controllers, touch and pad, audio, saves; macOS, iOS/iPadOS and tvOS apps build from a ROM with `tools/build_app.py` and run in the simulators | done for the homebrew test ROM (no commercial game built into it yet; nothing run on a physical device) |
 
 ## Try it
 
@@ -57,6 +57,7 @@ python3 tests/difftest.py                  # the recompiler against Unicorn's AR
 python3 tests/test_discovery.py            # code discovery on small synthetic images
 python3 tests/test_rom.py                  # the ROM reader on synthetic images
 python3 tests/test_hw.py                   # build a homebrew ROM, recompile it, run it
+python3 tests/test_app.py                  # the Mac app on the test ROM (needs Xcode or its Command Line Tools)
 ```
 
 `test_hw.py` builds a test ROM shaped like a commercial game: a BLZ-compressed ARM9 binary,
@@ -94,6 +95,9 @@ right), `--touch F:X:Y`, `--save PATH` keeps the save memory in a file (with `--
 when the game isn't in the built-in table of save chips: see the note the runtime prints), and
 `--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run.
 
+`python3 tools/build_app.py game.nds -o build/app --platform macos` builds a Mac app with your game
+in it; iOS, tvOS and the simulators are in [app/README.md](app/README.md).
+
 ## How it works
 
 1. `tools/nds.py` reads the ROM. It decompresses the ARM9 static image and the overlays, and
@@ -118,12 +122,16 @@ the road to commercial games, an Apple app and the 3DS.
 | Path | What |
 |---|---|
 | `tools/nds.py`, `tools/ndsinfo.py` | ROM reader and inspector |
+| `tools/build_app.py` | ROM to Mac, iOS or tvOS app (recompile, `libdsn.a` per SDK, XcodeGen, xcodebuild) |
+| `app/` | the Apple app: DSNKit (shared), DSNCore (C shim), the Mac, iPhone/iPad and Apple TV apps; see [app/README.md](app/README.md) |
 | `recomp/` | the recompiler (`python3 -m recomp`) |
 | `runtime/` | the C runtime: CPU and dispatcher (`cpu.c`), the DS (`nds.c`), 2D (`gpu2d.c`), headless driver |
 | `tests/difftest.py` | differential test against Unicorn |
 | `tests/test_discovery.py` | code discovery cases the test ROM only hits with some layouts |
 | `tests/test_rom.py` | the ROM reader: module parameters and autoload lists of each SDK layout |
 | `tests/test_hw.py`, `tests/hw/` | the homebrew end-to-end test |
+| `tests/test_app.py` | the Mac app end to end on the test ROM, plus `swift test` |
+| `tests/test_units.py`, `tests/unit/` | C unit tests of the runtime |
 
 ## Acknowledgements
 

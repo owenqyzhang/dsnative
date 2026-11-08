@@ -14,6 +14,10 @@
   - `python3 tests/test_hw.py`: the homebrew ROM end to end (suite output against the host,
     hardware results, screens in `build/hwtest/screen.png`).
   - `python3 tests/test_units.py`: C unit tests of the runtime (`tests/unit/test_*.c`).
+  - `python3 tests/test_app.py` after a change to `app/`, `tools/build_app.py` or the runtime API
+    the app uses (`nds.h`, `nds_audio_take`, the options): the Mac app end to end on the test ROM
+    and `swift test`. The iOS and tvOS builds are checked by hand with `tools/build_app.py --platform
+    ios-sim|tvos-sim --run` (see `app/README.md`).
 - Hardware subsystems live in files of their own: `runtime/rtc.c`, `save.c`, `sound.c`,
   `gpu3d.c`, each with a header holding its state (a member of `Nds`). `nds.c` gives them the
   first look at every I/O access (`<x>_io_read`/`<x>_io_write`), calls `<x>_init`, the

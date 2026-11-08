@@ -303,18 +303,44 @@ What a Nitro SDK game needs that homebrew doesn't, roughly in the order a game h
 
 ### 3. An Apple app
 
-A Swift/SwiftUI shell around the C runtime, built by Xcode from the generated sources:
+Built and running for macOS, iOS/iPadOS and tvOS on the homebrew test ROM (no commercial game
+built into it yet, nothing run on a physical device). It is a Swift package, `app/`: DSNKit holds
+everything shared, DSNCore is a thin C shim, and DSNative is the Mac app; the iPhone/iPad and Apple
+TV hosts come from an Xcode project that XcodeGen generates from `app/project.yml`. DSNCore hides
+`Nds` from Swift, because its large fixed arrays import as huge tuples. It boots a game as
+`main_headless.c` does, copies the two 256x192 0xAARRGGBB framebuffers per frame, and moves
+`nds_audio_take`'s output into a lock-free ring that the audio thread drains.
 
-- **Screens**: Metal output of both screens, laid out for each device. Two screens where the
-  device has them, stacked or side by side on a single display, and a TV layout for Apple TV.
-- **Input**: touch on the bottom screen (mapped through the SPI touch controller), game
-  controllers through GameController.framework, an on-screen pad on iPhone, and the Siri
-  Remote as a minimal pad on tvOS.
-- **Audio**: AVAudioEngine fed by the sound mixer.
-- **Saves and settings**: in the app's documents, exportable.
-- **Packaging**: a script that turns a ROM into an IPA or Mac app, as nxnative's
-  `build_ipa_from_nsp.py` does, so the existing Switch launchers (NX2Apple, NX Play) could
-  add DS games alongside Switch ones.
+- **Frame loop**: the emulation runs on its own thread, paced to 59.8261 Hz from absolute deadlines
+  (it restarts after a stall instead of bursting), and publishes frames through a triple buffer.
+- **Screens**: Metal draws the two screens as textured quads from a layout (stacked or side by
+  side, aspect-preserving or integer scaling; a TV layout inside Apple TV's overscan margin), and
+  the same layout maps a pointer or finger to touch-screen pixels. Shaders are precompiled, with a
+  run-time `makeLibrary(source:)` fallback.
+- **Input**: keyboard, GameController (with the Siri Remote as a minimal pad on tvOS), mouse or
+  touch on the bottom screen, an on-screen pad on iPhone and iPad (it steps aside for a controller
+  that has sent input), and a script, all combined.
+- **Audio**: an `AVAudioEngine` source node at 32768 Hz stereo, with an `ambient` session on iOS and
+  `playback` on tvOS; it restarts after interruptions and device changes.
+- **Saves**: Application Support on the Mac and tvOS, Documents on iOS (the Files app shows it),
+  written every 10 s when the game changed it, when the app leaves the foreground, and on quit.
+  The game pauses in the background.
+- **Packaging**: `tools/build_app.py ROM -o OUT --platform {macos,ios,ios-sim,tvos,tvos-sim}`
+  recompiles the ROM once, builds `libdsn.a` with each SDK's clang and minimum version (17.0),
+  writes an xcconfig, has XcodeGen generate the project, and runs unsigned `xcodebuild`; `--run`
+  installs and launches in a simulator and takes a screenshot. A device build needs the user's own
+  team and bundle identifier in Xcode. The generated C for a big game is large (about 300 MB of C
+  and a 100 MB library for Black 2), and every platform needs its own library, so the C compile
+  dominates the build.
+- **Tests**: `tests/test_app.py` builds the Mac app on the test ROM, compares its `--smoke` run
+  (screens and debug output, and the audio ring against dsn_headless's WAV) with `dsn_headless`
+  and runs the package's `swift test`; an iOS-only hit-test test runs through `xcodebuild` on a
+  simulator.
+
+Lessons that cost time: a closure made in a main-actor method is itself main-actor isolated and
+traps on the audio thread (build the audio source node in a nonisolated function); a SwiftUI view
+that ignores the safe area reads zero insets from `GeometryProxy`; and the iOS Simulator lists a
+stand-in gamepad.
 
 ### 4. Speed
 
