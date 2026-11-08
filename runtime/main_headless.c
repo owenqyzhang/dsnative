@@ -2,11 +2,15 @@
  * game's debug output (no$gba port) and writes both screens to a PNG.
  *
  *   dsn_headless <game.nds> <arm9.bin> [--frames N] [--png out.png] [--keys F:KEYS,...]
- *                [--touch F:X:Y,...] [--stats]
+ *                [--touch F:X:Y,...] [--stats] [--no-interp | --interp-only]
  *
  * arm9.bin is the decompressed ARM9 image the recompiler wrote. --keys holds the buttons
  * pressed from frame F on (letters a b l r x y s=start e=select and the arrows u d L R as
- * U D W E; an empty set releases them).
+ * U D W E; an empty set releases them). Code with no compiled entry (modified at run time, or
+ * missed by discovery) runs in the interpreter and is logged once to missing.txt; --no-interp
+ * stops at it instead, to find the gaps; --interp-only ignores the compiled code and
+ * interprets everything (a check of the interpreter against the whole machine);
+ * --stats prints how many instructions were interpreted.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,11 +94,11 @@ static u16 parse_keys(const char *s, const char *end) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s game.nds arm9.bin [--frames N] [--png out.png] [--keys F:KEYS,...] [--touch F:X:Y,...] [--stats]\n"
+        fprintf(stderr, "usage: %s game.nds arm9.bin [--frames N] [--png out.png] [--keys F:KEYS,...] [--touch F:X:Y,...] [--stats] [--no-interp | --interp-only]\n"
                         "       [--<subsystem option> value ...]\n", argv[0]);
         return 2;
     }
-    int frames = 60, stats = 0;
+    int frames = 60, stats = 0, no_interp = 0, interp_only = 0;
     const char *png = 0, *keys = "", *touch = "";
     const char *opts[64]; int nopts = 0;     /* the subsystems' options, as name, value pairs */
     for (int i = 3; i < argc; i++) {
@@ -103,6 +107,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
         else if (!strcmp(argv[i], "--touch") && i + 1 < argc) touch = argv[++i];
         else if (!strcmp(argv[i], "--stats")) stats = 1;
+        else if (!strcmp(argv[i], "--no-interp")) no_interp = 1;
+        else if (!strcmp(argv[i], "--interp-only")) interp_only = 1;
         else if (!strncmp(argv[i], "--", 2) && i + 1 < argc && nopts < 64) { opts[nopts++] = argv[i]; opts[nopts++] = argv[++i]; }
         else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
     }
@@ -114,8 +120,10 @@ int main(int argc, char **argv) {
         if (!nds_option(s, opts[i], opts[i + 1])) { fprintf(stderr, "unknown option %s\n", opts[i]); return 2; }
     s->arm9.table = g9_table; s->arm9.table_len = g9_table_len;
     s->arm7.table = g7_table; s->arm7.table_len = g7_table_len;
+    s->arm9.no_interp = s->arm7.no_interp = (u32)no_interp;
     s->arm9.pic = g9_pic; s->arm9.pic_len = g9_pic_len;
     s->arm7.pic = g7_pic; s->arm7.pic_len = g7_pic_len;
+    if (interp_only) s->arm9.table_len = s->arm7.table_len = s->arm9.pic_len = s->arm7.pic_len = 0;
     nds_direct_boot(s, a9, a9_len);
     for (int f = 0; f < frames; f++) {
         /* input script */
@@ -144,6 +152,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "frames %u, ARM9: %llu cycles, %llu dispatches, pc %08x%s; ARM7: %llu cycles, %llu dispatches, pc %08x%s\n",
                 s->frame, (unsigned long long)s->arm9.cycles, (unsigned long long)s->arm9.dispatches, s->arm9.r[15], s->arm9.stop ? " (stopped)" : "",
                 (unsigned long long)s->arm7.cycles, (unsigned long long)s->arm7.dispatches, s->arm7.r[15], s->arm7.stop ? " (stopped)" : "");
+        fprintf(stderr, "interpreted: ARM9 %llu instructions in %llu entries, ARM7 %llu instructions in %llu entries\n",
+                (unsigned long long)s->arm9.interp_insns, (unsigned long long)s->arm9.interp_calls,
+                (unsigned long long)s->arm7.interp_insns, (unsigned long long)s->arm7.interp_calls);
     }
     nds_shutdown(s);
     return (s->arm9.stop || s->arm7.stop) ? 1 : 0;

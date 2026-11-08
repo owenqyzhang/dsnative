@@ -1,6 +1,7 @@
 """End-to-end test: build the homebrew test ROM, recompile it, run it headless and check
 its debug output against the host's run of the same suite and the expected hardware
-results; writes the screens to build/hwtest/screen.png.
+results, then runs it again with every instruction interpreted and expects the same output;
+writes the screens to build/hwtest/screen.png.
 
     python3 tests/test_hw.py
 """
@@ -32,7 +33,7 @@ def main():
             elif line.strip() and not line.startswith('#'):
                 extra_lines.append(line)
     res = subprocess.run([os.path.join(gen, 'dsn_headless'), rom, os.path.join(gen, 'arm9.bin'), '--frames', '100',
-                          '--png', png, '--keys', '35:E,45:ED,55:', '--stats', *extra_args],
+                          '--png', png, '--keys', '35:E,45:ED,55:', '--stats', '--no-interp', *extra_args],
                          cwd=gen, capture_output=True, text=True)
     lines = [l[len('[debug] '):] for l in res.stdout.splitlines() if l.startswith('[debug] ')]
     ref = open(os.path.join(OUT, 'host_ref.txt')).read().splitlines()
@@ -61,6 +62,23 @@ def main():
         h = ((h ^ ((i * 0x9E3779B9) & 0xFFFFFFFF)) * 0x01000193) & 0xFFFFFFFF
     if got.get('itcm') != f'itcm {h:08x}':
         failures.append(f'expected "itcm {h:08x}", got "{got.get("itcm")}"')
+    # the same ROM with every instruction interpreted (no compiled code on either CPU) must say the same
+    # (the timer test counts cycles, which compiled code charges a block at a time: it just has to pass)
+    ires = subprocess.run([os.path.join(gen, 'dsn_headless'), rom, os.path.join(gen, 'arm9.bin'), '--frames', '100',
+                           '--png', os.path.join(OUT, 'screen_interp.png'), '--keys', '35:E,45:ED,55:', '--stats',
+                           '--interp-only', *extra_args], cwd=gen, capture_output=True, text=True)
+    igot = {l.split()[0]: l for l in (l[len('[debug] '):] for l in ires.stdout.splitlines() if l.startswith('[debug] ')) if l.split()}
+    for k, v in got.items():
+        if k == 'timer':
+            if not igot.get(k, '').startswith('timer ok'):
+                failures.append(f'interpreted: timer: {igot.get(k)}')
+        elif igot.get(k) != v:
+            failures.append(f'interpreted: expected "{v}", got "{igot.get(k)}"')
+    for k in igot:
+        if k not in got:
+            failures.append(f'interpreted: unexpected "{igot[k]}"')
+    if 'ARM9 0 instructions' in ires.stderr or 'ARM7 0 instructions' in ires.stderr or ires.returncode:
+        failures.append(f'interpreted run: {ires.stderr.strip().splitlines()[-2:]}')
     print('\n'.join(lines))
     print(res.stderr.strip())
     if failures:

@@ -672,6 +672,14 @@ static int in_bios(Cpu *c, u32 pc) {
     return pc < 0x4000;
 }
 
+/* The interpreter's way back: after each instruction it asks whether the dispatcher has
+ * something to do at `pc` (an interrupt to take, the stop address, BIOS code, or code that was
+ * compiled for the address). 2: an interrupt, after which the flow goes on at pc; 1: anything else. */
+int dsr_interp_exit(Cpu *c, u32 pc) {
+    if (irq_pending(c)) return 2;
+    return pc == c->exit_pc || in_bios(c, pc) || lookup(c, pc | c->t) || lookup_pic(c, pc);
+}
+
 /* Run for `cycles` cycles (or until stopped). Returns the cycles run. */
 s32 dsr_run(Cpu *c, s32 cycles) {
     c->budget += cycles;
@@ -693,6 +701,7 @@ s32 dsr_run(Cpu *c, s32 cycles) {
                 c->r[15] = p->fn(c, pc);
                 continue;
             }
+            if (!c->no_interp) { c->r[15] = dsr_interp(c, pc); continue; }
             c->misses++;
             c->last_miss = pc | c->t;
             if (c->log_miss) c->log_miss(c, pc, c->t);

@@ -1,11 +1,21 @@
-"""Differential test of the recompiler against Unicorn's ARM946 (QEMU's ARMv5TE model).
+"""Differential test of the recompiler and the interpreter against Unicorn's ARM946 (QEMU's
+ARMv5TE model) and against each other.
 
 Builds thousands of random snippets of ARM and Thumb code (data processing, multiplies,
 the ARMv5TE DSP instructions, loads and stores of every kind, block transfers, conditional
-branches), recompiles them to C with the real recompiler, runs them natively and in Unicorn
-from the same random state, and compares the registers, the flags and a 4 KB data area.
+branches), recompiles them to C with the real recompiler, and runs each from the same random
+state in Unicorn, as recompiled code, in the runtime's interpreter (no compiled code at all),
+and with half of the snippet's compiled entries dropped (control passes between the two, in
+both directions). It compares the registers, the flags and a 4 KB data area.
 
-    python3 tests/difftest.py [--cases N] [--seed S]
+Unicorn can't judge the DS-specific classes (CP15, SWI, mode switches, user-bank transfers,
+undefined encodings), and its snippets are structured. So a second part, for both CPUs
+(ARMv5TE and ARMv4T), runs single random instructions of every encoding class, in every
+mode, with random banked registers and wild memory accesses, as recompiled code and in the
+interpreter, and compares everything: all registers, the CPSR and SPSR, the banked
+registers, the memory and the sequence of accesses outside it, and where it stopped.
+
+    python3 tests/difftest.py [--cases N] [--seed S] [--fuzz N]
 """
 import argparse
 import os
@@ -269,7 +279,7 @@ def make_cases(r, count):
                 regs[12] = r.randrange(0, 16) * 4
         regs[15] = 0
         cpsr = (r.getrandbits(5) << 27) | 0x1F | 0xC0
-        cases.append((start, int(thumb), exit_, regs, cpsr))
+        cases.append((start, int(thumb), exit_, regs, cpsr, 0))
     return bytes(image), cases
 
 
@@ -281,7 +291,7 @@ def run_unicorn(image, cases):
     data = image[DATA - BASE:]
     regs_ids = [getattr(A, f'UC_ARM_REG_R{i}') for i in range(13)] + [A.UC_ARM_REG_SP, A.UC_ARM_REG_LR]
     out = []
-    for start, thumb, ex, regs, cpsr in cases:
+    for start, thumb, ex, regs, cpsr, _ in cases:
         uc.mem_write(DATA, data)
         uc.reg_write(A.UC_ARM_REG_CPSR, cpsr)
         for i, rid in enumerate(regs_ids):
@@ -301,30 +311,60 @@ def run_unicorn(image, cases):
     return out
 
 
-def build_native(image, cases, work):
-    prog = Program([('test', BASE, image[:len(cases) * SLOT], 'static')], arch=5, prefix='g9')
-    prog.discover([(s, bool(t)) for s, t, *_ in cases])
+FIELDS = [f'r{i}' for i in range(15)] + ['flags', 'data', 'pc', 'cpsr', 'spsr', 'banked registers', 'outside accesses', 'stopped']
+
+
+def build_native(image, cases, work, arch=5):
+    """Recompile the cases and run them as compiled code (A), interpreted (B) and mixed (C).
+    Returns, per case, the final state of each run: {'A': [...], 'B': [...], 'C': [...]}, each
+    list the 15 registers, the flags, the data hash and the fields in FIELDS."""
+    prefix = 'g9' if arch == 5 else 'g7'
+    prog = Program([('test', BASE, image[:len(cases) * SLOT], 'static')], arch=arch, prefix=prefix)
+    prog.discover([(c[0], bool(c[1])) for c in cases])
     gen = os.path.join(work, 'gen')
     prog.emit(gen)
     srcs = [os.path.join(gen, f) for f in sorted(os.listdir(gen)) if f.endswith('.c')]
     exe = os.path.join(work, 'difftest')
-    cmd = ['cc', '-O1', '-w', '-I', os.path.join(ROOT, 'runtime'), '-o', exe,
-           os.path.join(HERE, 'difftest_main.c'), os.path.join(ROOT, 'runtime', 'cpu.c')] + srcs
+    cmd = ['cc', '-O1', '-w', '-I', os.path.join(ROOT, 'runtime'), f'-DTABLE={prefix}_table', f'-DTABLE_LEN={prefix}_table_len',
+           f'-DARCH={arch}', '-o', exe, os.path.join(HERE, 'difftest_main.c'), os.path.join(ROOT, 'runtime', 'cpu.c'),
+           os.path.join(ROOT, 'runtime', 'interp.c')] + srcs
     subprocess.run(cmd, check=True)
     inp = os.path.join(work, 'cases.bin')
     with open(inp, 'wb') as f:
         f.write(struct.pack('<II', len(cases), len(image)))
         f.write(image)
-        for start, thumb, ex, regs, cpsr in cases:
-            f.write(struct.pack('<3I', start, thumb, ex))
+        for start, thumb, ex, regs, cpsr, kind in cases:
+            f.write(struct.pack('<4I', start, thumb, ex, kind))
             f.write(struct.pack('<16I', *regs))
             f.write(struct.pack('<I', cpsr))
-    res = subprocess.run([exe, inp], check=True, capture_output=True, text=True)
+    errs = []
+    runs = {}
+    ends = os.path.join(work, 'ends.bin')
+    for run in 'ABC':
+        res = subprocess.run([exe, inp, run] + ([ends] if run != 'A' else []), check=True, capture_output=True, text=True)
+        errs += [l for l in res.stderr.splitlines() if l.strip() and not l.startswith('[ARM')]    # the runtime's own notes
+        lines = {}
+        for line in res.stdout.splitlines():
+            t = line.split()
+            lines[int(t[1])] = None if t[0] == 'S' else [int(x, 16) if k > 1 else x for k, x in enumerate(t)][2:]
+        runs[run] = lines
+        if run == 'A':
+            with open(ends, 'wb') as f:
+                for i, case in enumerate(cases):
+                    # where it stopped; the others run on instead (0xFFFFFFFF) where A ran code at that address:
+                    # a loop (it used up its budget), or its own start in the state it started in (an undefined
+                    # instruction there). Its own start in the other state is a different place, which A had no
+                    # code for, but the stop address can't say so and the others can't be run: 0xFFFFFFFE skips them.
+                    pc, cpsr, stopped = lines[i][17], lines[i][18], lines[i][22]
+                    at_start = pc == case[0]
+                    same_state = (cpsr >> 5) & 1 == case[1]
+                    f.write(struct.pack('<I', 0xFFFFFFFF if not stopped or (at_start and same_state) else
+                                        0xFFFFFFFE if at_start else pc))
     out = []
-    for line in res.stdout.splitlines():
-        v = [int(x, 16) for x in line.split()]
-        out.append((v[:15], v[15], v[16]))
-    return out, res.stderr
+    for i in range(len(cases)):
+        a = runs['A'][i]
+        out.append({r: (runs[r][i] if runs[r].get(i) is not None else a) for r in 'ABC'})
+    return out, '\n'.join(errs)
 
 
 def disasm(image, start, thumb, ex):
@@ -334,11 +374,127 @@ def disasm(image, start, thumb, ex):
     return '\n'.join(f'    {i.address:08x}: {i.bytes.hex():10s} {i.mnemonic} {i.op_str}' for i in md.disasm(code, start))
 
 
+# ---------------------------------------------------------------- single random instructions
+# (value, mask) of each ARM encoding class, in the order the decoders test them: the bits in the
+# mask are fixed, the others random. Together they cover every class the runtime decodes,
+# including the ones Unicorn can't judge. Bits 31-28 (the condition) are random where the
+# mask leaves them free.
+ARM_CLASSES = [
+    (0x02000000, 0x0E000000),   # data processing, immediate
+    (0x00000000, 0x0E000010),   # data processing, shift by immediate
+    (0x00000010, 0x0E000090),   # data processing, shift by register
+    (0x00000090, 0x0FC000F0),   # MUL, MLA
+    (0x00800090, 0x0F8000F0),   # UMULL, UMLAL, SMULL, SMLAL
+    (0x01000080, 0x0F900090),   # SMLAxy, SMLAWy, SMULWy, SMLALxy, SMULxy
+    (0x01000050, 0x0F900FF0),   # QADD, QSUB, QDADD, QDSUB
+    (0x016F0F10, 0x0FFF0FF0),   # CLZ
+    (0x012FFF10, 0x0FFFFFF0),   # BX
+    (0x012FFF30, 0x0FFFFFF0),   # BLX register
+    (0x01200070, 0x0FF000F0),   # BKPT
+    (0x010F0000, 0x0FBF0FFF),   # MRS
+    (0x0120F000, 0x0FB0FFF0),   # MSR, register
+    (0x0320F000, 0x0FB0F000),   # MSR, immediate
+    (0x01000090, 0x0FB00FF0),   # SWP, SWPB
+    (0x00000090, 0x0E000090),   # halfword, signed and doubleword transfers (SH 0 is undefined)
+    (0x04000000, 0x0E000000),   # LDR, STR, LDRB, STRB, immediate offset
+    (0x06000000, 0x0E000010),   # LDR, STR, LDRB, STRB, shifted register offset
+    (0x06000010, 0x0E000010),   # (undefined: the media space)
+    (0x08000000, 0x0E000000),   # LDM, STM
+    (0x0A000000, 0x0E000000),   # B, BL
+    (0xFA000000, 0xFE000000),   # BLX immediate
+    (0x0F000000, 0x0F000000),   # SWI
+    (0x0E000F10, 0x0F000F10),   # MRC, MCR to CP15
+    (0x0E000000, 0x0F000000),   # coprocessor data processing and transfers (other coprocessors)
+    (0x0C000000, 0x0E000000),   # LDC, STC
+    (0xF0000000, 0xF0000000),   # the unconditional space: PLD, BLX, the rest undefined
+    (0x00000000, 0x00000000),   # anything
+]
+MODES = [0x10, 0x11, 0x12, 0x13, 0x17, 0x1B, 0x1F]
+SAFE_SWI = [0x03, 0x04, 0x05, 0x06, 0x07, 0x09, 0x0D, 0x0F, 0x1F, 0xEE]     # none reaches a long loop
+
+
+def fuzz_arm(r):
+    v, m = r.choice(ARM_CLASSES)
+    w = v | (r.getrandbits(32) & ~m & 0xFFFFFFFF)
+    if not m >> 28 and r.random() < 0.6:
+        w = (w & 0x0FFFFFFF) | 0xE0000000
+    if (w & 0x0F000000) == 0x0F000000 and w >> 28 != 0xF:
+        w = (w & 0xFF00FFFF) | (r.choice(SAFE_SWI) << 16)
+    if (w & 0x0E000000) == 0x0A000000:      # a branch: to its own sentinel or itself (the rest of the slot is
+        if r.random() < 0.5:                # padding), or well outside the image
+            w = (w & 0xFF000000) | r.choice([0xFFFFFE, 0xFFFFFF])
+        else:
+            w = (w & 0xFF00FFFF) | (r.randrange(1, 15) << 20) | (w & 0xFFFFF)
+    return [w]
+
+
+def fuzz_thumb(r):
+    k = r.random()
+    if k < 0.12:        # BL or BLX pair
+        return [0xF000 | r.getrandbits(11), (0xF800 if r.random() < 0.7 else 0xE800) | r.getrandbits(11)]
+    if k < 0.16:        # a prefix or suffix on its own
+        return [r.choice([0xF000, 0xF800, 0xE800]) | r.getrandbits(11)]
+    hw = r.getrandbits(16)
+    if hw >> 8 == 0xDF:
+        hw = 0xDF00 | r.choice(SAFE_SWI)
+    return [hw]
+
+
+def make_fuzz_cases(r, count, arch):
+    """One random instruction per slot, then a branch to itself; the rest of the slot is that
+    branch too (ARM and Thumb), so a branch that lands anywhere near stops there."""
+    image = bytearray(DATA - BASE + DATA_LEN)
+    image[DATA - BASE:] = bytes(r.getrandbits(8) for _ in range(DATA_LEN))
+    cases = []
+    for i in range(count):
+        start = BASE + i * SLOT
+        thumb = r.random() < 0.5
+        if thumb:
+            hws = fuzz_thumb(r)
+            code = b''.join(struct.pack('<H', x) for x in hws)
+            pad = struct.pack('<H', 0xE7FE)
+        else:
+            code = b''.join(struct.pack('<I', x) for x in fuzz_arm(r))
+            pad = struct.pack('<I', 0xEAFFFFFE)
+        slot = code + pad * ((SLOT - len(code)) // len(pad))
+        image[start - BASE:start - BASE + SLOT] = slot
+        ptr = r.random() < 0.6
+        regs = []
+        for _ in range(16):
+            if ptr and r.random() < 0.5:
+                regs.append(DATA + 0x400 + r.randrange(0, 0x180) * 4 + (r.randrange(4) if r.random() < 0.2 else 0))
+            elif r.random() < 0.8:
+                regs.append(r.getrandbits(32))
+            else:
+                regs.append(r.choice([0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, r.randrange(64)]))
+        regs[15] = 0
+        cpsr = (r.getrandbits(5) << 27) | r.choice(MODES) | (r.getrandbits(2) << 6)
+        cases.append((start, int(thumb), start + len(code), regs, cpsr, 1))
+    return bytes(image), cases
+
+
+def compare(case, image, a, b, label_a, label_b, fields, show, counter):
+    """Compare two runs' states on `fields` (indices into FIELDS); print the first few differences."""
+    diff = [k for k in fields if a[k] != b[k]]
+    if not diff:
+        return False
+    counter[0] += 1
+    if counter[0] <= show:
+        start, thumb, ex, regs, cpsr, kind = case
+        print(f'case at {start:08x} ({"Thumb" if thumb else "ARM"}): {label_a} and {label_b} differ; initial cpsr {cpsr:08x}')
+        print(disasm(image, start, thumb, ex + (4 if kind and not thumb else 2)))
+        for k in diff:
+            ini = f' (in {regs[k]:08x})' if k < 15 else ''
+            print(f'    {FIELDS[k]}{ini}: {label_a} {a[k]:08x} {label_b} {b[k]:08x}')
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--cases', type=int, default=3000)
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--show', type=int, default=5)
+    ap.add_argument('--fuzz', type=int, help='single random instructions per CPU (default: as many as --cases)')
     args = ap.parse_args()
     r = random.Random(args.seed)
     count = min(args.cases, (DATA - BASE) // SLOT)
@@ -348,30 +504,46 @@ def main():
         nat, err = build_native(image, cases, work)
     if err.strip():
         print(err[:2000])
-    bad = 0
+    bad = [0]
     skipped = 0
-    for i, (case, (rv, rf, rh, rerr), (nv, nf, nh)) in enumerate(zip(cases, ref, nat)):
+    UNI = list(range(15)) + [15, 16]        # what Unicorn gives: registers, flags, data
+    ALL = list(range(len(FIELDS)))
+    for i, (case, (rv, rf, rh, rerr), n) in enumerate(zip(cases, ref, nat)):
+        # the three runs of the same code agree with each other, whatever Unicorn did
+        bad_before = bad[0]
+        compare(case, image, n['A'], n['B'], 'compiled', 'interpreted', ALL, args.show, bad)
+        compare(case, image, n['A'], n['C'], 'compiled', 'mixed', ALL, args.show, bad)
         if rerr:
             skipped += 1
             if os.environ.get('SHOW_SKIPPED') and skipped <= 3:
-                start, thumb, ex, regs, cpsr = case
+                start, thumb, ex, regs, cpsr, _ = case
                 print('skipped', i, rerr); print(disasm(image, start, thumb, ex))
             continue
-        if rv != nv or rf != nf or rh != nh:
-            bad += 1
-            if bad <= args.show:
-                start, thumb, ex, regs, cpsr = case
-                print(f'case {i} ({"Thumb" if thumb else "ARM"}) differs; initial cpsr {cpsr:08x}')
-                print(disasm(image, start, thumb, ex))
-                for k in range(15):
-                    if rv[k] != nv[k]:
-                        print(f'    r{k}: in {regs[k]:08x} unicorn {rv[k]:08x} native {nv[k]:08x}')
-                if rf != nf:
-                    print(f'    flags: unicorn {rf:08x} native {nf:08x}')
-                if rh != nh:
-                    print('    data area differs')
-    print(f'{count} cases: {count - bad - skipped} match, {bad} differ, {skipped} skipped (Unicorn faulted)')
-    return 1 if bad else 0
+        for tag, name in (('A', 'compiled'), ('B', 'interpreted'), ('C', 'mixed')):
+            v = n[tag]
+            uni = rv + [rf, rh]
+            if bad[0] == bad_before and compare(case, image, uni, v[:17], 'unicorn', name, range(17), args.show, bad):
+                break
+    print(f'{count} cases: {count - bad[0] - skipped} match, {bad[0]} differ, {skipped} skipped (Unicorn faulted); '
+          f'each run compiled, interpreted and mixed')
+    total_bad = bad[0]
+    fuzz = args.cases if args.fuzz is None else args.fuzz
+    fuzz = min(fuzz, (DATA - BASE) // SLOT)
+    for arch, name in ((5, 'ARMv5TE'), (4, 'ARMv4T')):
+        if not fuzz:
+            break
+        fr = random.Random(args.seed * 1000 + arch)
+        fimage, fcases = make_fuzz_cases(fr, fuzz, arch)
+        with tempfile.TemporaryDirectory() as work:
+            nat, err = build_native(fimage, fcases, work, arch)
+        if err.strip():
+            print(err[:2000])
+        fbad = [0]
+        for case, n in zip(fcases, nat):
+            compare(case, fimage, n['A'], n['B'], 'compiled', 'interpreted', ALL, args.show, fbad)
+        print(f'{name}: {fuzz} random instructions: {fuzz - fbad[0]} match, {fbad[0]} differ (compiled and interpreted)')
+        total_bad += fbad[0]
+    return 1 if total_bad else 0
 
 
 if __name__ == '__main__':

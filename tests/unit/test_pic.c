@@ -46,6 +46,7 @@ int main(void) {
     cpu.write_slow = slow_write;
     dsr_reset(&cpu, 4, BASE);
     cpu.exit_pc = BASE + 0x3000;
+    cpu.no_interp = 1;      /* a stub that doesn't match must stop the run, not be interpreted */
     cpu.pic = pics;
     cpu.pic_len = 2;
 

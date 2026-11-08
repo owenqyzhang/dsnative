@@ -70,6 +70,10 @@ struct Cpu {
     /* CP15 (ARM9) */
     u32 cp15_ctrl, cp15_dtcm, cp15_itcm;
     u64 cycles;                 /* total cycles run */
+    /* the interpreter (interp.c) runs code with no compiled entry, unless no_interp is set */
+    u32 no_interp;
+    u64 interp_calls, interp_insns;
+    u32 interp_res[4], interp_nres;     /* where interpreted flows left the interpreter, to be brought back to (see interp.c) */
 };
 
 typedef struct DispatchEntry {
@@ -189,6 +193,10 @@ u32 dsr_bad_entry(Cpu *c, u32 pc, u32 fn);
 u32 dsr_swi(Cpu *c, u32 num, u32 next);          /* BIOS call; nonzero: leave the function for that address */
 int dsr_cp15_write(Cpu *c, u32 crn, u32 crm, u32 op2, u32 v);   /* nonzero: leave (halt) */
 u32 dsr_cp15_read(Cpu *c, u32 crn, u32 crm, u32 op2);
+
+/* The interpreter (interp.c): runs the code at pc, which nothing was compiled for (or whose
+ * bytes changed), until control reaches an address the dispatcher can run; returns that address. */
+u32 dsr_interp(Cpu *c, u32 pc);
 
 /* BX-style jump: bit 0 selects the state */
 static inline u32 dsr_bx(Cpu *c, u32 v) { c->t = v & 1; return c->t ? (v & ~1u) : (v & ~3u); }

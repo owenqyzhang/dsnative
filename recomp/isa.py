@@ -284,13 +284,11 @@ def arm_halfword(w, ins, arch):
             if write_back and rn != 15:
                 c.append(f'R[{rn}] = ea;')
         elif arch < 5:
-            ins.code = [f'return dsr_undefined(c, {h(addr)}, {h(w)});']
-            ins.flow = 'stop'
+            undefined(ins, w)       # (with its condition dropped: a conditional stop would fall off the function)
             return
         elif sh == 2:   # LDRD
             if rd & 1 or rd == 14:
-                ins.code = [f'return dsr_undefined(c, {h(addr)}, {h(w)});']
-                ins.flow = 'stop'
+                undefined(ins, w)
                 return
             c.append(f'u32 v0 = rd32(c, a), v1 = rd32(c, a + 4);')
             if write_back and rn != 15:
@@ -298,8 +296,7 @@ def arm_halfword(w, ins, arch):
             c.append(f'R[{rd}] = v0; R[{rd + 1}] = v1;')
         else:           # STRD
             if rd & 1 or rd == 14:
-                ins.code = [f'return dsr_undefined(c, {h(addr)}, {h(w)});']
-                ins.flow = 'stop'
+                undefined(ins, w)
                 return
             c.append(f'wr32(c, a, R[{rd}]); wr32(c, a + 4, R[{rd + 1}]);')
             if write_back and rn != 15:
