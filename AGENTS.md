@@ -15,6 +15,9 @@
     hardware results, screens in `build/hwtest/screen.png`).
   - `python3 tests/test_units.py`: C unit tests of the runtime (`tests/unit/test_*.c`);
     `DSN_SANITIZE=1` builds them under ASan and UBSan.
+  - `python3 tests/test_interp.py` after a change to `runtime/interp.c` or the miss path in `cpu.c`;
+    `difftest.py` also runs every snippet interpreted and mixed, so interpreter semantics must follow
+    `recomp/isa.py`.
   - `python3 tests/test_app.py` after a change to `app/`, `tools/build_app.py` or the runtime API
     the app uses (`nds.h`, `nds_audio_take`, the options): the Mac app end to end on the test ROM
     and `swift test`. The iOS and tvOS builds are checked by hand with `tools/build_app.py --platform

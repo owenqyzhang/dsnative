@@ -148,10 +148,63 @@ after recompilation, and compares registers, flags and memory.
 2. run BIOS code if the PC is in the BIOS (the interrupt entry and return, and the IntrWait
    loop, all written in C);
 3. look up the address (a direct-mapped cache in front of a binary search of the table);
-4. call the function.
+4. call the function; if there is none (or an overlay's check bytes no longer match), run the
+   interpreter fallback below.
 
 Overlay code carries the first bytes it was compiled from. The dispatcher compares them with
 memory, so the right overlay runs when several share an address.
+
+### Interpreter fallback (`runtime/interp.c`)
+
+Two kinds of code have no compiled entry: code the game modifies while it runs, and code discovery
+never found. Pokémon Black 2 shows both: overlay 338 patches the first word of a compiled
+function with `movs r0, #0xaa; bx lr` and calls it (a write-then-execute check), and several
+overlays are stored encrypted in the ROM and decrypted in RAM at run time, so the recompiler
+compiled ciphertext and the dispatcher's check bytes no longer match what is in memory. Where
+`dsr_run` used to stop with "no recompiled code at X", it now calls `dsr_interp(c, pc)`. That
+decodes and executes ARM and Thumb instructions one at a time (ARMv5TE on the ARM9, ARMv4T on the
+ARM7) until control reaches an address the dispatcher can run, and returns that address as a
+recompiled function does. It generates no code, so it is allowed on iOS and tvOS, and the
+compiled fast path is untouched: the interpreter is entered only on the miss path.
+
+The semantics are those of `recomp/isa.py`. `interp.c` keeps its structure and decode order,
+including the quirks (an undefined encoding stops even when its condition fails; a
+data-processing write to the PC never interworks; LDRD/STRD only on the ARMv5TE and only with an
+even register below LR), and uses the same `dsr.h` helpers for flags, shifter operands, loads and
+stores, interworking, CP15, SWI and the user bank, so compiled and interpreted code share one
+`Cpu` state and call each other freely in both directions. Budget is one per instruction, charged
+whether or not the condition passes. Interrupts are taken as the dispatcher takes them, but after
+every instruction rather than only between functions: after each instruction `dsr_interp_exit()`
+says whether to go back to the dispatcher (a pending interrupt, the stop address, BIOS code, an
+address with a matching compiled entry or PIC stub). A flow that returns because its slice ended,
+it was interrupted, or it waits in Halt, IntrWait or a CP15 wait is remembered (up to four resume
+addresses in `Cpu.interp_res`), so that the dispatcher bringing it back is not counted as a new
+entry. Each address the interpreter enters is logged once per CPU to `missing.txt`.
+
+Headless options: `--no-interp` keeps the old behaviour (stop at the missing address), which
+discovery work should use to find gaps; `--interp-only` ignores all compiled code and interprets
+everything, as a check of the interpreter against the whole machine (`test_hw` runs the homebrew
+ROM this way and expects the same debug output, except the timer test, which counts cycles that
+compiled code charges a block at a time); `--stats` prints the interpreted instruction counts.
+Timing differs from compiled code only in where interrupts are taken.
+
+Testing: `tests/difftest.py` runs each random snippet three ways against Unicorn: recompiled,
+interpreted, and mixed (half the compiled entries dropped, so control passes between the two in
+both directions); a second part runs single random instructions of every ARM and Thumb encoding
+class on both CPUs (including CP15, SWI, mode switches, user-bank LDM/STM, SWP, LDRD/STRD,
+undefined encodings and wild memory accesses), compiled against interpreted, comparing all
+registers, CPSR and SPSR, banked registers, memory, the sequence of accesses and the stop
+address. `tests/test_interp.py` patches a compiled function at run time, runs functions copied to
+RAM that were never compiled, and falls from interpreted code into compiled code and back;
+`tests/unit/test_interp.c` covers the budget, interrupts, BIOS waits, halts, overlay check
+mismatches and the log.
+
+Known limits: encrypted overlays are still compiled as ciphertext (dead code), and feeding
+`missing.txt` back with `--extra` does not help, because the ROM still holds ciphertext; a later
+step could capture the decrypted bytes from a run. Black 2 runs 3000 frames in about 11 s with the
+interpreter (587 instructions interpreted to reach the overworld; about 101,000 with menu and
+walking input), against about 5.5 s for compiled code alone before it, and about 20 s fully
+interpreted.
 
 Because no guest frame lives on the host stack, guest threads (the Nitro OS switches contexts
 by rewriting SP and PC), interrupts and nested exceptions work as they do on the hardware.

@@ -11,9 +11,8 @@ attached).
 
 This is a proof of concept. It runs homebrew from start to finish. A commercial game (Pokémon
 Black 2) now runs through boot on both CPUs, plays its intro movie with sound, shows its textured 3D
-title scene and its main menu with the saved game, and stops soon after at code the game rewrites
-at run time (an interpreter fallback for that is in progress): see [Status](#status) and
-[the roadmap](docs/design.md#roadmap).
+title scene and its main menu with the saved game, loads the save into the overworld and opens the
+party screen: see [Status](#status) and [the roadmap](docs/design.md#roadmap).
 
 Nothing from any game is in this repository. You bring your own dumps.
 
@@ -37,6 +36,7 @@ advantages of native execution:
 | Code discovery: calls, branches, jump targets read by a symbolic evaluator (GCC and CodeWarrior switches, ARM and Thumb), interworking veneers, function pointers in literal pools and data, start-up stubs, position-independent stubs found by content | done for the forms seen so far, plus a missing-code feedback loop |
 | Overlays sharing an address | handled: each candidate is checked against memory at run time |
 | Runtime: dispatcher, CPU modes and banked registers, interrupts, BIOS (high-level: every documented NDS call except GetBootProcs and the DSi-only ones, callback decompression included), CP15, TCM | done |
+| Interpreter fallback (`runtime/interp.c`) for code the recompiler cannot have compiled: code modified at run time, stored encrypted, or missed by discovery; no generated code, so it is allowed on iOS and tvOS | done |
 | DS hardware: memory map, VRAM banks, DMA, timers, IPC sync and FIFOs, divider, square root, cartridge reads, SPI (power, firmware, touch), keypad | done for what homebrew uses |
 | 2D engines: text, affine, extended affine and bitmap backgrounds (including the large bitmap and extended palettes), regular, affine and bitmap sprites, windows, mosaic, blending, master brightness, VRAM and main memory display, internal affine reference points, the 3D layer as BG0; display capture | done |
 | Firmware flash (ARM7 SPI): header, Wi-Fi settings, never-configured access point slots (the SDK's start-up check passes), user settings, the chip's full instruction set | done |
@@ -90,9 +90,12 @@ cd build/game && ./dsn_headless ../../game.nds arm9.bin --frames 600 --png out.p
 ```
 
 `ndsinfo` works on any DS ROM today. The recompiler and build run, and a commercial game runs
-until the first code or hardware the runtime doesn't handle yet. When it reaches code that
-discovery missed, the runtime appends the address to `missing.txt`. Pass that file back with
-`--extra missing.txt` for the next build.
+until the first hardware the runtime doesn't handle yet. Code discovery missed, or that the game
+rewrites at run time, runs in the interpreter fallback, and the runtime appends each such address to
+`missing.txt`; pass that file back with `--extra missing.txt` for the next build (it does not help
+for code the game stores encrypted: the ROM still holds the ciphertext). `--no-interp` stops at such
+code instead, for discovery work; `--interp-only` interprets everything, as a check; `--stats` also
+prints the interpreted instruction counts.
 
 Headless options: `--keys 100:a,105:` presses A at frame 100 and releases it at 105 (buttons
 `a b x y l r s e` for A, B, X, Y, L, R, Start and Select; `U D W E` for up, down, left and
