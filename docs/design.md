@@ -179,8 +179,36 @@ counted as one cycle each for now.
 - **Divider and square root** (ARM9), with the hardware's divide-by-zero results.
 - **Cartridge**: B7 reads, chip ID, interrupts and DMA, including the secure-area
   redirection below 0x8000.
-- **SPI** (ARM7): the power manager, the firmware flash (with generated user settings) and the
-  touch screen controller.
+- **SPI** (ARM7): the power manager, the firmware flash and the touch screen controller.
+- **Firmware flash** (`runtime/firmware.c`): the 256 KB flash is built when the machine is
+  created, not read from a file. It holds the header (console type FFh = DS, chip size, user
+  settings pointer), the Wi-Fi hardware settings after it at 2Ah (length 138h, CRC-16 from 0,
+  version 0 = an original DS, channel mask, RF chip type 2, the 16 port values, baseband
+  defaults, the RF table, per-channel RF words from a 22 MHz reference that reproduces GBATEK's
+  channel 1 example), three access point slots and the hidden fourth at 3FA00h..3FDFFh, and two
+  user settings areas at 3FE00h/3FF00h with the "settings okay" flags set. The SDK's start-up
+  check reads the four slots and tests each one's CRC-16 (start value 0, over 00h..FDh) and
+  status byte (FFh, not configured, is accepted). A slot of a never-configured console is zeros
+  with status FFh and a valid CRC, so the check passes without any write, and no network, no
+  Wi-Fi Connection user ID and no access point exist: without this, Pokémon Black 2 shows "Your
+  Wi-Fi User Information may have been erased". The one console-specific value invented is the
+  MAC address (a locally administered 02:"DSNAT"). The chip answers READ, FAST READ, RDID,
+  RDSR, WREN, WRDI, PW, PP, PE, SE, DP and RDP, so a game that repairs a slot can write it
+  (writes stay in RAM; there is no file).
+- **Wi-Fi** (`runtime/wifi.c`): the ARM7's Wi-Fi hardware at 0x04800000-0x0480FFFF as a stub that
+  gets the SDK's initialization through and reports no network. The ports at 0x04808000 have
+  GBATEK's writable-bit masks and reset values; W_IF/W_IE feed one edge into the ARM7's IF bit 24;
+  the resets, W_POWERSTATE and W_POWERFORCE work; the baseband chip (ID 6Dh) and the RF chip sit
+  behind serial interfaces that are always ready; W_RANDOM follows its sequence, the microsecond
+  counter runs on emulated time, and the 8 KB Wi-Fi RAM has the TX and RX buffer ports. Nothing
+  is ever received, and transmit requests are accepted and not carried out. Black 2's ARM7
+  touches 75 distinct ports and runs a RAM test over the whole 8 KB, after which its
+  initialization completes.
+- **DSi registers in DS mode** (`runtime/dsi.c`): what a DSi answers while running a DS cartridge.
+  With SCFG_EXT's bit 31 clear, SCFG_A9ROM and the SCFG and MBK range 0x04004000-0x04004063 read 0
+  and take no writes, as do the new DMA, camera, DSP, AES, SD/MMC, SDIO Wi-Fi, microphone and
+  I2C blocks, IE2/IF2 and the second slot's ports. On the ARM7, SNDEXCNT (0x04004700) and the
+  GPIO registers work, as they do on a DSi in this mode.
 - **RTC** (`runtime/rtc.c`, ARM7 0x04000138): the Seiko S-35180, a 3-wire serial clock the ARM7
   bit-bangs. CS rising starts a transfer. The chip reads SIO on each rising SCK edge (a command
   byte with fixed code 0110, a 3-bit command and the read/write bit, then the parameters, all
@@ -256,21 +284,100 @@ counted as one cycle each for now.
   bits apply to the commands after the swap. Lighting follows GBATEK but has no tests yet. The
   rasterizer draws the whole frame at line 262 into a 256x192 buffer of 6-bit colour and 5-bit
   alpha with a 24-bit Z or W buffer, scanline by scanline: the rear plane, then opaque polygons
-  in the order sent, then translucent ones (sorted by Y unless the swap asked for manual order;
-  GBATEK gives no rule, so this is a guess). A pixel is drawn when its centre is inside the
+  in the order sent, then translucent ones (sorted by bottom then top Y unless the swap asked for
+  manual order; GBATEK gives no sort rule, so that is a guess; polygons with a translucent
+  texture, A3I5 or A5I3, count as translucent too, as long as DISP3DCNT bit 0 is on, which is an
+  inference from GBATEK's "Translucent Texture" naming: without it a nearer A5I3 polygon sent
+  before a farther opaque one is wiped out, because translucent pixels do not write depth). A pixel is drawn when its centre is inside the
   polygon; polygons with no area on screen (lines, dots) draw their whole run, and polygons
   whose bounding box is at most 1x1 draw as one pixel. Colour and W are interpolated
   perspective-correctly, Z linearly. Alpha blending follows the 3D engine's formula, with the
   translucent polygon-ID rule (a translucent pixel does not draw over one with the same ID) and
-  bit 11 deciding whether it writes depth; wire frames are alpha 0. This first cut is
-  untextured: every polygon takes its colour from its vertices. The frame is engine A's BG0 when
+  bit 11 deciding whether it writes depth; wire frames are alpha 0. Textures and effects are
+  described below. The frame is engine A's BG0 when
   DISPCNT bit 3 is set (and POWCNT1 bit 3): BG0HOFS scrolls a 512-pixel region (the image, then
   256 transparent pixels), BG0CNT gives the priority, and with BLDCNT's alpha effect, BG0 as
   first target and a second target below it, a translucent pixel blends by its own alpha (EVA =
   A/2, EVB = 16 - A/2, which GBATEK itself marks as a guess), while alpha 31 stays whole.
-- **2D engines**, one scanline at a time: text, affine, extended affine and bitmap
-  backgrounds, regular and affine sprites, priorities, alpha blending, brightness effects,
-  master brightness and VRAM display mode.
+- **3D textures and effects** (`gpu3d_render.c`). The frame is drawn in this order: the rear plane
+  (CLEAR_COLOR and CLEAR_DEPTH, or, with DISP3DCNT bit 14, a colour bitmap in texture slot 2 and a
+  depth bitmap in slot 3, 256x256 and scrolled by CLRIMAGE_OFFSET with wrap), the opaque polygons
+  in the order sent, the translucent ones, then edge marking, fog and anti-aliasing as whole-frame
+  passes over the colour and attribute buffers. The attribute buffer holds per pixel the opaque and
+  translucent polygon IDs, the fog flag, an edge flag, the shadow stencil bit and the
+  anti-aliasing coverage. Texture memory is the four 128 KB slots of VRAM banks A-D mapped with
+  MST 3 and the eight 16 KB palette slots of banks E, F and G (`nds.c` exports `vram_texslot` and
+  `vram_texpal`); a slot no bank covers reads as zero, which is a guess. The renderer fetches one
+  texel per pixel at the perspective-correct (S, T), the floor of the 12.12 coordinate, then
+  repeat, flip (needs repeat) or clamp per axis, with no filtering. The seven formats follow
+  GBATEK's tables: A3I5 (alpha a*4+a/2), 2-, 4- and 8-bit indexed with colour 0 transparent when
+  TEXIMAGE_PARAM bit 29 is set (the 2-bit PLTT_BASE steps 8 bytes), 4x4 compressed (blocks in slot
+  0 or 2, index halfwords in slot 1, the four palette modes), A5I3 and direct colour. TEXCOORD goes
+  through the texture matrix in the four transform modes; the products shift by 20 bits (12+12
+  fraction bits down to S's 4). Polygon modes use GBATEK's blend formulas, written for 6-bit colour
+  and alpha: 5-bit values become X*2+1 (zero stays zero) and the result is cut back to 5 bits.
+  Modulation multiplies texel and vertex colour and alpha. Decal mixes by the texel alpha and keeps
+  the polygon's alpha. Toon and highlight take the vertex red as the TOON_TABLE index; highlight
+  adds the shading colour back, capped at 63. Shadow polygons: ID 0 only sets a stencil bit where
+  the depth test passes and draws nothing; other IDs draw where the stencil is clear, clear it,
+  and draw only where their ID differs from the opaque ID beneath. A translucent pixel blends over
+  what is there unless that is a translucent pixel of the same polygon ID. Fog uses
+  FogDepthBoundary[n] = FOG_OFFSET + (0x400 >> shift) * (n + 1) with linear interpolation of the
+  32-entry density table, in colour-and-alpha or alpha-only mode, per polygon by POLYGON_ATTR bit
+  15. Edge marking outlines opaque polygons in EDGE_COLOR[id >> 3] where a neighbour has another
+  ID and greater depth; the rear plane's ID counts beyond the screen edge. Lighting (NORMAL, four
+  lights, DIF_AMB, SPE_EMI, SHININESS) is in `gpu3d.c`; its hardware rounding is unknown, so the
+  tests allow one step of the 5-bit result. Anti-aliasing is an approximation: an opaque polygon's
+  left and right edge pixels carry a coverage and are mixed with the pixel just outside, or become
+  translucent by the coverage over a clear rear plane. `DSN_SANITIZE=1 python3 tests/test_units.py`
+  builds the unit tests under ASan and UBSan with the shift checks on.
+- **BIOS decompression** (`runtime/cpu.c`): LZ77, run-length and Huffman decoding are one state
+  machine that asks for its source one unit at a time and writes bytes, 16-bit pairs (the VRAM
+  variants) or words (Huffman). SWIs 11h and 14h run it to the end inside the call. SWIs 12h, 13h
+  and 15h (the NDS's callback variants) need guest code, which may wait for hardware, so the job
+  is parked in a per-CPU `BiosJob`: `dsr_swi` returns the callback's address with `lr` pointing
+  into the BIOS, and when the callback returns there `bios_exec` feeds `r0` to the machine and
+  issues the next request, as IntrWait parks at BIOS_INTRWAIT. The 16-bit variants hold the low
+  byte until its pair arrives, which reproduces GBATEK's "disp=000h does not work" caveat. Also:
+  SoftReset (clears the 200h bytes at the fixed address, sets the three stacks, enters system
+  mode with interrupts off, jumps through [027FFE24h]/[027FFE34h]), the Diff8/Diff16 unfilters,
+  GetSineTable (round(7FFFh * sin), with a series so `cpu.c` links without libm), CustomPost.
+  Not done: GetBootProcs and the DSi-only calls.
+- **2D engines** (`runtime/gpu2d.c`), one scanline at a time. Backgrounds: text, affine,
+  extended affine (16-bit map entries, and the 256-colour and direct-colour bitmaps) and the large
+  512x1024 bitmap (engine A's BG2, mode 6), with BG and OBJ extended palettes from VRAM E-H
+  (engine A) and VRAM H-I (engine B). Sprites: regular, affine (double size), bitmap OBJs in both
+  mappings with their alpha, OBJ mosaic, semi-transparent OBJs and OBJ window sprites. Windows:
+  WIN0, WIN1, OBJ window and outside, with WININ/WINOUT masks and GBATEK's "DS Window Glitches" (X2
+  of 0 or below X1 reaches column 256, Y2 past 192 or below Y1 reaches the last line, and Y1 of 1
+  to 6 fires again in lines 257 to 262 because the DS compares 8 bits of its line counter). BG
+  mosaic repeats the first line and pixel of each block. Effects: alpha blending, brighten and
+  darken, master brightness. Engine A's BG0 can be the 3D layer. The display mode is off (white),
+  graphics, VRAM display (a whole bank, engine A) or main memory display (the FIFO below).
+  BG2X/Y and BG3X/Y are internal reference points: copied at VBlank, advanced by PB/PD each line,
+  and a write outside VBlank is copied at the next drawn line, so an HBlank DMA that writes BG2Y
+  per line gives the per-line origin of floor and rotation effects. X and Y are independent
+  (writing only BGxX leaves Y advancing by PD), and drawing does not depend on the order of
+  lines. A change of PB/PD in mid-frame is still taken as if it held since the last copy.
+- **Display capture** (`runtime/capture.c`, DISPCAPCNT 0x04000064 and DISP_MMEM_FIFO 0x04000068,
+  engine A only). Writing bit 31 requests a capture. The register is latched at line 0 of the
+  next frame, and one line is captured per visible line while gpu2d.c composes it. The busy bit
+  clears at line 192 whatever the size, which is what games poll. Source A is the engine's
+  composed 2D output (before master brightness) or the 3D layer alone (bit 24). Source B is a
+  VRAM bank, read through DISPCNT's bank select and the read offset, or the main memory FIFO
+  (bit 25). Following GBATEK's block diagram, B reads the display's 256-pixel lines whatever the
+  capture size, while the destination is packed `width` pixels a line (a reading of the diagram:
+  GBATEK's text does not say it outright). The result is A, B, or the blend `A*EVA + B*EVB`, each
+  term counting only where its source pixel is opaque (bit 15), EVA and EVB clamped at 16. Sizes
+  are 128x128, 256x64, 256x128 and 256x192; the destination bank and its write offset (steps of
+  0x8000) wrap at 128 KB. A capture reads the display's VRAM line before it writes its own, so a
+  capture into the bank being shown is the usual one-frame feedback (Pokémon Black 2 blends 12/16
+  of the new frame with 4/16 of the old one as motion blur, and shows its 3D scenes this way:
+  engine A in VRAM display mode from bank D, capturing the 3D layer into it). Main memory display
+  and capture from the FIFO need a DMA channel in the display FIFO timing (4) enabled at line 0:
+  `nds.c` then triggers it 32 times a line, 8 pixels a burst, through a 1024-pixel FIFO that each
+  frame starts afresh. Capture reads and writes the physical VRAM banks and does not consult
+  VRAMCNT.
 
 ## Roadmap
 
@@ -288,15 +395,11 @@ What a Nitro SDK game needs that homebrew doesn't, roughly in the order a game h
 - **Sound**: done (see above): the 16 channels, capture, and mixing to 32768 Hz into a ring for
   the app (`nds_audio_take`), plus the ARM7 BIOS sound calls. The Apple app's AVAudioEngine only
   has to drain the ring.
-- **3D**: the geometry engine and an untextured software rasterizer are done as described
-  above. What remains: textures (Pokémon Black 2 sets TEXIMAGE_PARAM on most of its geometry),
-  toon/highlight shading, fog, edge marking, anti-aliasing, shadow polygons, the rear-plane
-  bitmap, a faster or Metal rasterizer.
-- **The rest of the 2D engines**: display capture first: Black 2 shows its 3D scenes by
-  capturing engine A's output (DISPCAPCNT) into VRAM bank D and displaying that bank with the
-  VRAM display mode, so none of its 3D reaches the screen without it. Then windows, mosaic,
-  bitmap sprites, the large bitmap mode and main-memory display.
-- **Wi-Fi**: enough register stubs for the SDK to initialize and report no network.
+- **3D**: done (see above) except exact anti-aliasing and texture filtering, and a faster or
+  Metal rasterizer (the rasterizer is software and single-threaded).
+- **The rest of the 2D engines and display capture**: done (see above). With them Pokémon Black
+  2's title scene reaches the screen, textured, and its main menu shows the saved game.
+- **Wi-Fi**: done as a stub (see above): the SDK initializes and reports no network.
 - **Game profiles**: per game (by game code and revision), the extra entry points, known
   data-in-code regions and patches. Like nxnative's `dm/games/<id>/`.
 - **DSi-enhanced titles** run in DS mode (Black 2 is one); DSi mode is out of scope for now.

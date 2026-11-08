@@ -10,8 +10,10 @@ the game runs, so it works where apps can't JIT (iOS, iPadOS and tvOS without a 
 attached).
 
 This is a proof of concept. It runs homebrew from start to finish. A commercial game (Pokémon
-Black 2) now runs through boot on both CPUs and on to its first screens, but its 3D and sound
-aren't implemented yet: see [Status](#status) and [the roadmap](docs/design.md#roadmap).
+Black 2) now runs through boot on both CPUs, plays its intro movie with sound, shows its textured 3D
+title scene and its main menu with the saved game, and stops soon after at code the game rewrites
+at run time (an interpreter fallback for that is in progress): see [Status](#status) and
+[the roadmap](docs/design.md#roadmap).
 
 Nothing from any game is in this repository. You bring your own dumps.
 
@@ -34,13 +36,16 @@ advantages of native execution:
 | Recompiler: ARMv5TE and ARMv4T, ARM and Thumb, to C | done; matches Unicorn's ARM946 on about 45,000 random snippets |
 | Code discovery: calls, branches, jump targets read by a symbolic evaluator (GCC and CodeWarrior switches, ARM and Thumb), interworking veneers, function pointers in literal pools and data, start-up stubs, position-independent stubs found by content | done for the forms seen so far, plus a missing-code feedback loop |
 | Overlays sharing an address | handled: each candidate is checked against memory at run time |
-| Runtime: dispatcher, CPU modes and banked registers, interrupts, BIOS (high-level), CP15, TCM | done |
+| Runtime: dispatcher, CPU modes and banked registers, interrupts, BIOS (high-level: every documented NDS call except GetBootProcs and the DSi-only ones, callback decompression included), CP15, TCM | done |
 | DS hardware: memory map, VRAM banks, DMA, timers, IPC sync and FIFOs, divider, square root, cartridge reads, SPI (power, firmware, touch), keypad | done for what homebrew uses |
-| 2D engines: text, affine and bitmap backgrounds, sprites, blending, master brightness, VRAM display, the 3D layer as BG0 | done (no windows, mosaic, bitmap sprites, display capture yet) |
+| 2D engines: text, affine, extended affine and bitmap backgrounds (including the large bitmap and extended palettes), regular, affine and bitmap sprites, windows, mosaic, blending, master brightness, VRAM and main memory display, internal affine reference points, the 3D layer as BG0; display capture | done |
+| Firmware flash (ARM7 SPI): header, Wi-Fi settings, never-configured access point slots (the SDK's start-up check passes), user settings, the chip's full instruction set | done |
+| Wi-Fi (ARM7) | a stub: the SDK's initialization runs (ports, baseband and RF chips, Wi-Fi RAM) and reports no network; nothing is received or sent |
+| DSi registers in DS mode | SCFG, MBK and the new blocks read 0 and drop writes; SNDEXCNT and GPIO on the ARM7 work, as a DSi running a DS cartridge has them |
 | RTC (ARM7): serial protocol, status, date and time (BCD, 12/24-hour), alarms, frequency, adjust and free registers, reset, /INT through RCNT; starts at host time or `--rtc`, runs on emulated time | done |
 | Save memory: EEPROM, FLASH and FRAM on the cartridge SPI bus, save file on disk; the chip comes from `--save-type`, a game-code table, a save file's size, else FLASH 512 KB with a note on stderr | done |
 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, mixer at 32768 Hz into a ring for the app, ARM7 BIOS sound calls | done; Pokémon Black 2's sound driver runs |
-| 3D engine (first cut): geometry engine (command FIFO and ports, GXSTAT, matrix stacks, clipping, box/position/vector tests, geometry FIFO DMA) and an untextured software rasterizer (Z or W buffer, Gouraud, alpha, wire frames) feeding engine A's BG0; no textures, toon, fog, edge marking or anti-aliasing yet | done for the geometry side, first cut for rendering |
+| 3D engine: geometry engine (command FIFO and ports, GXSTAT, matrix stacks, lighting, clipping, box/position/vector tests, geometry FIFO DMA) and a software rasterizer (Z or W buffer, Gouraud, all seven texture formats, modulation/decal/toon/highlight/shadow polygons, alpha blending, fog, edge marking, an approximate anti-aliasing) feeding engine A's BG0 | done (no texture filtering, no exact anti-aliasing; the rasterizer is software) |
 | Wi-Fi | not started |
 | Apple app shell: Swift package with Metal screens, controllers, touch and pad, audio, saves; macOS, iOS/iPadOS and tvOS apps build from a ROM with `tools/build_app.py` and run in the simulators | done for the homebrew test ROM (no commercial game built into it yet; nothing run on a physical device) |
 
@@ -85,8 +90,8 @@ cd build/game && ./dsn_headless ../../game.nds arm9.bin --frames 600 --png out.p
 ```
 
 `ndsinfo` works on any DS ROM today. The recompiler and build run, and a commercial game runs
-until the first hardware the runtime doesn't implement yet (3D and sound). When it reaches code
-that discovery missed, the runtime appends the address to `missing.txt`. Pass that file back with
+until the first code or hardware the runtime doesn't handle yet. When it reaches code that
+discovery missed, the runtime appends the address to `missing.txt`. Pass that file back with
 `--extra missing.txt` for the next build.
 
 Headless options: `--keys 100:a,105:` presses A at frame 100 and releases it at 105 (buttons
