@@ -12,6 +12,7 @@ void rtc_test9(void) __attribute__((weak));
 void save_test9(void) __attribute__((weak));
 void sound_test9(void) __attribute__((weak));
 void gpu3d_test9(void) __attribute__((weak));
+void bios_test9(void) __attribute__((weak));
 
 u32 arm7_command(u32 id, u32 arg) {
     REG_IPCFIFOSEND = 0x80000000u | (id << 24) | (arg & 0xFFFFFF);
@@ -222,6 +223,7 @@ int main(void) {
             if (save_test9) save_test9();
             if (sound_test9) sound_test9();
             if (gpu3d_test9) gpu3d_test9();
+            if (bios_test9) bios_test9();
         }
     }
 }

@@ -6,6 +6,9 @@
 #include "save.h"
 #include "sound.h"
 #include "gpu3d.h"
+#include "firmware.h"
+#include "wifi.h"
+#include "dsi.h"
 
 #define SCREEN_W 256
 #define SCREEN_H 192
@@ -67,18 +70,21 @@ typedef struct Nds {
     /* SPI (ARM7): power manager, firmware, touch screen */
     u16 spicnt; u8 spi_data; int spi_pos; u8 spi_cmd; u32 spi_addr;
     u8 pm_regs[8]; u8 pm_index;
-    u8 *firmware; u16 touch_adc;
+    u16 touch_adc;
     /* screens */
     u32 fb[2][SCREEN_W * SCREEN_H];     /* [0] top, [1] bottom, 0xAARRGGBB */
     /* debug output (no$gba port) */
     char dbg[1024]; int dbg_len;
     void (*debug_line)(const char *s);
     u64 time;                   /* bus (ARM7) cycles since start */
-    /* subsystems in files of their own (rtc.c, save.c, sound.c, gpu3d.c) */
+    /* subsystems in files of their own (rtc.c, save.c, sound.c, gpu3d.c, firmware.c, wifi.c, dsi.c) */
     Rtc rtc;
     Save save;
     Sound sound;
     Gpu3d g3d;
+    Firmware fw;
+    Wifi wifi;
+    Dsi dsi;
 } Nds;
 
 Nds *nds_create(const u8 *rom, u32 rom_size);

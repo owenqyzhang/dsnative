@@ -1,0 +1,12 @@
+# BIOS decompression and copy calls through recompiled code (bios_9.c): the callbacks are ARM and
+# Thumb guest code reading a source nothing is mapped at; 258h is the 600 bytes decompressed.
+# Length returned, Open calls, Close calls for the calls that take callbacks.
+bioslz77 ok
+bioslz77cb ok 00000258 00000001 00000001
+bioslz77ab ok 00000258 00000001 00000001
+biosrlcb ok 00000258
+bioshuffcb ok 00000258 00000001 00000001
+biosunpack ok
+biosfast ok
+biosdiff ok
+bioscrc ok

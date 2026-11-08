@@ -132,39 +132,191 @@ int dsr_cp15_write(Cpu *c, u32 crn, u32 crm, u32 op2, u32 v) {
 }
 
 /* ---- BIOS (high-level) ---------------------------------------------------- */
-static u16 crc16_update(u16 crc, const u8 *p, u32 n) {
-    for (u32 i = 0; i < n; i++) {
-        crc ^= p[i];
-        for (int k = 0; k < 8; k++) crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
-    }
+static u32 crc16_update(u32 crc, u32 byte) {
+    crc ^= byte & 0xFF;
+    for (int k = 0; k < 8; k++) crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
     return crc;
 }
 
-static void bios_lz77(Cpu *c, u32 src, u32 dst) {
-    u32 hdr = rd32(c, src); src += 4;
-    u32 size = hdr >> 8;
-    u32 out = 0;
-    while (out < size) {
-        u32 flags = rd8(c, src++);
-        for (int i = 0; i < 8 && out < size; i++, flags <<= 1) {
-            if (flags & 0x80) {
-                u32 b0 = rd8(c, src++), b1 = rd8(c, src++);
-                u32 len = (b0 >> 4) + 3, disp = (((b0 & 0xF) << 8) | b1) + 1;
-                for (u32 k = 0; k < len && out < size; k++, out++) wr8(c, dst + out, rd8(c, dst + out - disp));
-            } else {
-                wr8(c, dst + out, rd8(c, src++)); out++;
+/* ---- decompression -------------------------------------------------------------------
+ * LZ77, run-length and Huffman decoding are one state machine that asks for its source one
+ * unit at a time: from memory (SWIs 11h and 14h run to the end inside the call) or from the
+ * callbacks of the SWI's callback structure (the NDS's SWIs 12h, 13h and 15h: GBATEK "NDS/DSi
+ * Decompression Callbacks"). A callback is guest code that may wait for hardware, so it runs as
+ * guest code and the job is parked in `jobs`: bios_exec resumes it each time a callback returns
+ * to BIOS_DEC_RET, as it does for IntrWait. */
+#define BIOS_DEC_RET 0x310u     /* where a decompression callback returns to */
+enum { REQ_OPEN, REQ_CLOSE, REQ_GET8, REQ_GET16, REQ_GET32, REQ_DONE };     /* the structure's order */
+enum { DEC_LZ77 = 1, DEC_HUFF, DEC_RL };
+enum { ST_START, ST_HEADER, ST_CLOSE, ST_FLAGS, ST_LZ_LIT, ST_LZ_B0, ST_LZ_B1, ST_RL_FLAG, ST_RL_RUN, ST_RL_LIT,
+       ST_H_SIZE, ST_H_TREE, ST_H_WORD };
+
+typedef struct {
+    int active, mem, kind, w16; /* parked in a callback; source is memory; algorithm; 16-bit writes (VRAM) */
+    u32 cbs, param;             /* callback structure, user parameter (Open's r2) */
+    u32 src, addr, req;         /* next source address; address and kind of the pending request */
+    u32 dst, size, out;         /* destination, bytes to write, bytes written */
+    u32 st, flags, nblk, b0, run, bits;
+    u32 tree, tsz, tpos, cur, acc, nacc;    /* Huffman: the tree copy in the guest's buffer, the walk, the word being built */
+    u32 pend, result;           /* low byte waiting for its pair (16-bit writes); what the SWI returns */
+    u32 ret_pc, ret_t, regs[5]; /* the caller: where to go on, r1-r3, r12, lr */
+} BiosJob;
+
+static BiosJob jobs[2];         /* by CPU: [1] is the ARM9 */
+
+static int ask(BiosJob *j, u32 req, u32 unit) { j->req = req; j->addr = j->src; j->src += unit; return (int)req; }
+static int dec_close(BiosJob *j) { j->st = ST_CLOSE; return ask(j, REQ_CLOSE, 0); }
+
+/* 16-bit writes (SWIs 12h and 15h, for VRAM) pair bytes up. An LZ copy reads the destination
+ * back from memory, so a byte still waiting for its pair reads stale: GBATEK's "disp=000h
+ * doesn't work" on the 16-bit variant. */
+static void dec_put(Cpu *c, BiosJob *j, u32 v) {
+    u32 i = j->out++;
+    if (!j->w16) wr8(c, j->dst + i, v);
+    else if (i & 1) wr16(c, j->dst + i - 1, j->pend | (v << 8));
+    else j->pend = v & 0xFF;
+}
+
+/* Take the result of the previous request (v) and return the next one. */
+static int dec_step(Cpu *c, BiosJob *j, u32 v) {
+    if (j->req == REQ_GET8) v &= 0xFF;
+    else if (j->req == REQ_GET16) v &= 0xFFFF;
+    switch (j->st) {
+    case ST_START:
+        j->st = ST_HEADER;
+        return ask(j, REQ_OPEN, 0);
+    case ST_HEADER:
+        if ((s32)v < 0) { j->result = v; return REQ_DONE; }     /* Open refused */
+        j->size = v >> 8; j->bits = v & 15; j->src += 4; j->nblk = 0;
+        if (!j->size || (j->kind == DEC_HUFF && !j->bits)) return dec_close(j);
+        if (j->kind == DEC_LZ77) goto lz_next;
+        if (j->kind == DEC_RL) goto rl_next;
+        j->st = ST_H_SIZE;
+        return ask(j, REQ_GET8, 1);
+    case ST_CLOSE:
+        if (j->w16 && (j->out & 1)) {       /* an odd last byte: the byte beside it stays */
+            u32 a = j->dst + j->out - 1;
+            wr16(c, a, (rd16(c, a) & 0xFF00) | j->pend);
+        }
+        j->result = (s32)v < 0 ? v : j->size;
+        return REQ_DONE;
+    /* LZ77: flag byte, then eight blocks, each a literal or a (length, displacement) pair */
+    lz_next:
+        if (j->out >= j->size) return dec_close(j);
+        if (!j->nblk) { j->st = ST_FLAGS; return ask(j, REQ_GET8, 1); }
+        j->st = (j->flags & 0x80) ? ST_LZ_B0 : ST_LZ_LIT;
+        j->flags <<= 1; j->nblk--;
+        return ask(j, REQ_GET8, 1);
+    case ST_FLAGS: j->flags = v; j->nblk = 8; goto lz_next;
+    case ST_LZ_LIT: dec_put(c, j, v); goto lz_next;
+    case ST_LZ_B0: j->b0 = v; j->st = ST_LZ_B1; return ask(j, REQ_GET8, 1);
+    case ST_LZ_B1: {
+        u32 len = (j->b0 >> 4) + 3, disp = (((j->b0 & 15) << 8) | v) + 1;
+        for (; len && j->out < j->size; len--) dec_put(c, j, rd8(c, j->dst + j->out - disp));
+        goto lz_next;
+    }
+    /* run-length: flag byte (bit 7: run of N+3, else N+1 literals), then the bytes */
+    rl_next:
+        if (j->out >= j->size) return dec_close(j);
+        j->st = ST_RL_FLAG;
+        return ask(j, REQ_GET8, 1);
+    case ST_RL_FLAG:
+        j->run = (v & 0x7F) + ((v & 0x80) ? 3 : 1);
+        if (v & 0x80) { j->st = ST_RL_RUN; return ask(j, REQ_GET8, 1); }
+    rl_lit:
+        if (!j->run || j->out >= j->size) goto rl_next;
+        j->st = ST_RL_LIT;
+        return ask(j, REQ_GET8, 1);
+    case ST_RL_RUN:
+        while (j->run-- && j->out < j->size) dec_put(c, j, v);
+        goto rl_next;
+    case ST_RL_LIT: dec_put(c, j, v); j->run--; goto rl_lit;
+    /* Huffman: the tree is copied into the caller's buffer (the callbacks can't be read twice),
+     * then the bit stream, 32 bits a word, walks it from the root and fills words of data units */
+    case ST_H_SIZE:
+        j->tsz = ((v & 0xFF) + 1) * 2; j->tpos = 1;
+        wr8(c, j->tree, v);
+    h_tree:
+        if (j->tpos < j->tsz) { j->st = ST_H_TREE; return ask(j, REQ_GET8, 1); }
+        j->cur = 1; j->acc = j->nacc = 0;
+    h_word:
+        if (j->out >= j->size) return dec_close(j);
+        j->st = ST_H_WORD;
+        return ask(j, REQ_GET32, 4);
+    case ST_H_TREE: wr8(c, j->tree + j->tpos++, v); goto h_tree;
+    case ST_H_WORD:
+        for (int n = 0; n < 32; n++, v <<= 1) {
+            u32 node = rd8(c, j->tree + j->cur), bit = v >> 31;
+            u32 child = ((j->cur & ~1u) + (node & 0x3F) * 2 + 2 + bit) & 0x1FF;
+            if (!(node & (bit ? 0x40 : 0x80))) { j->cur = child; continue; }
+            j->acc |= (rd8(c, j->tree + child) & ((1u << j->bits) - 1)) << j->nacc;
+            j->cur = 1;
+            if ((j->nacc += j->bits) >= 32) {
+                wr32(c, j->dst + j->out, j->acc);
+                j->out += 4; j->acc = j->nacc = 0;
+                if (j->out >= j->size) return dec_close(j);
             }
         }
+        goto h_word;
+    }
+    return REQ_DONE;
+}
+
+/* Run the job until it needs guest code or is done. Returns the address of the callback to run
+ * (c->t set for it; r0.. hold its arguments and lr the way back), or 0 when the job is done. */
+static u32 dec_run(Cpu *c, BiosJob *j, u32 v) {
+    for (;;) {
+        u32 req = (u32)dec_step(c, j, v);
+        if (req == REQ_DONE) return 0;
+        if (j->mem) {
+            v = req == REQ_GET8 ? rd8(c, j->addr) : req == REQ_GET16 ? rd16(c, j->addr) : req == REQ_CLOSE ? 0 : rd32(c, j->addr);
+            continue;
+        }
+        u32 fn = rd32(c, j->cbs + 4 * req);
+        if (!fn && req == REQ_CLOSE) { v = 0; continue; }       /* Close is optional */
+        if (!fn) { j->result = ~0u; return 0; }
+        c->r[0] = j->addr;
+        if (req == REQ_OPEN) { c->r[1] = j->dst; c->r[2] = j->param; }
+        c->r[14] = c->bios_base + BIOS_DEC_RET + 1;
+        return dsr_bx(c, fn);
     }
 }
 
-static void bios_rl(Cpu *c, u32 src, u32 dst) {
-    u32 hdr = rd32(c, src); src += 4;
-    u32 size = hdr >> 8, out = 0;
-    while (out < size) {
-        u32 f = rd8(c, src++);
-        if (f & 0x80) { u32 n = (f & 0x7F) + 3, b = rd8(c, src++); while (n-- && out < size) wr8(c, dst + out++, b); }
-        else { u32 n = (f & 0x7F) + 1; while (n-- && out < size) wr8(c, dst + out++, rd8(c, src++)); }
+static void dec_return(Cpu *c, BiosJob *j) {
+    c->r[0] = j->result;
+    c->r[1] = j->regs[0]; c->r[2] = j->regs[1]; c->r[3] = j->regs[2]; c->r[12] = j->regs[3]; c->r[14] = j->regs[4];
+}
+
+/* SWI 12h, 13h, 15h: nonzero when a callback has to run first */
+static u32 bios_decompress_cb(Cpu *c, u32 num, u32 next) {
+    BiosJob *j = &jobs[c->arch == 5];
+    memset(j, 0, sizeof *j);
+    j->kind = num == 0x12 ? DEC_LZ77 : num == 0x13 ? DEC_HUFF : DEC_RL;
+    j->w16 = num != 0x13;           /* Huffman writes whole words */
+    j->src = c->r[0]; j->dst = c->r[1]; j->param = j->tree = c->r[2]; j->cbs = c->r[3];
+    j->regs[0] = c->r[1]; j->regs[1] = c->r[2]; j->regs[2] = c->r[3]; j->regs[3] = c->r[12]; j->regs[4] = c->r[14];
+    j->ret_pc = next; j->ret_t = c->t;
+    u32 pc = dec_run(c, j, 0);
+    if (pc) { j->active = 1; return pc; }
+    dec_return(c, j);
+    return 0;
+}
+
+/* SWI 11h, 14h: memory to memory */
+static void bios_decompress(Cpu *c, int kind) {
+    BiosJob j;
+    memset(&j, 0, sizeof j);
+    j.mem = 1; j.kind = kind; j.src = c->r[0]; j.dst = c->r[1];
+    dec_run(c, &j, 0);
+}
+
+/* Diff8bitUnFilter and Diff16bitUnFilter (SWI 16h, 18h; ARM9): the units are running sums */
+static void bios_unfilter(Cpu *c, u32 src, u32 dst, int wide) {
+    u32 size = rd32(c, src) >> 8, sum = 0, unit = wide ? 2 : 1;
+    src += 4;
+    for (u32 i = 0; i + unit <= size; i += unit) {
+        if (wide) { sum = (sum + rd16(c, src + i)) & 0xFFFF; wr16(c, dst + i, sum); }
+        else { sum = (sum + rd8(c, src + i)) & 0xFF; wr8(c, dst + i, sum); }
     }
 }
 
@@ -231,14 +383,66 @@ static u32 bios_sound_table(int volume, u32 i) {
     return i < BIOS_PITCH_LEN ? pitch[i] : 0;
 }
 
+/* GetSineTable (ARM7, SWI 1Ah): 64 entries, 7FFFh * sin(i * 90 / 64 degrees) rounded to nearest.
+ * That scale reproduces GBATEK's last entry, 7FF5h (8000h would give 7FF6h). The series for sin
+ * needs no libm. Outside the 64 GBATEK says "garbage": this returns 0. */
+static u32 bios_sine(u32 i) {
+    static u16 tab[64];
+    static int ready;
+    if (!ready) {
+        for (int k = 0; k < 64; k++) {
+            double x = k * 3.14159265358979323846 / 128, term = x, sum = x;
+            for (int n = 1; n < 16; n++) { term *= -x * x / ((2 * n) * (2 * n + 1)); sum += term; }
+            tab[k] = (u16)(32767.0 * sum + 0.5);
+        }
+        ready = 1;
+    }
+    return i < 64 ? tab[i] : 0;
+}
+
+/* SoftReset (GBATEK "BIOS Reset Functions"): clear the 200h bytes holding the stacks and the BIOS
+ * interrupt vector and flags, give the three stacks their fixed addresses (the ARM9's are
+ * hardcoded for the DTCM's default base, 00800000h: GBATEK's "0803FC0h" is that plus 3FC0h), zero r0-r12 and the svc and irq link and saved status
+ * registers, enter system mode and jump through the entry point the cartridge header left in
+ * main RAM. The other CPU is untouched. Interrupts stay off until the program enables them. */
+static u32 bios_softreset(Cpu *c) {
+    int a9 = c->arch == 5;
+    u32 zero = a9 ? 0x00803E00u : 0x0380FE00u;
+    u32 sp_svc = a9 ? 0x00803FC0u : 0x0380FFDCu, sp_irq = a9 ? 0x00803FA0u : 0x0380FFB0u, sp_sys = a9 ? 0x00803EC0u : 0x0380FF00u;
+    u32 entry = rd32(c, a9 ? 0x027FFE24u : 0x027FFE34u);
+    for (u32 i = 0; i < 0x200; i += 4) wr32(c, zero + i, 0);
+    if (a9) dsr_cp15_write(c, 1, 0, 0, 0x12078);
+    dsr_set_cpsr(c, 0xC0 | MODE_SVC, 0xFF);
+    c->r[13] = sp_svc; c->r[14] = 0; c->spsr = 0;
+    dsr_set_cpsr(c, 0xC0 | MODE_IRQ, 0xFF);
+    c->r[13] = sp_irq; c->r[14] = 0; c->spsr = 0;
+    dsr_set_cpsr(c, 0xC0 | MODE_SYS, 0xFF);
+    for (int i = 0; i < 13; i++) c->r[i] = 0;
+    c->r[13] = sp_sys;
+    c->r[14] = entry;
+    c->halted = 0; c->wait_mask = 0;
+    memset(&jobs[a9], 0, sizeof jobs[a9]);
+    return dsr_bx(c, entry);
+}
+
+/* The ARM7's CpuSet and CpuFastSet quietly do nothing when the source start or end is in the BIOS */
+static int bios_src_protected(Cpu *c, u32 src, u32 bytes) {
+    return c->arch == 4 && (src < 0x4000 || (u32)(src + bytes - 1) < 0x4000);
+}
+
 #define BIOS_INTRWAIT 0x300u
 
 u32 dsr_swi(Cpu *c, u32 num, u32 next) {
     c->budget -= 8;
     switch (num) {
-    case 0x03:  /* WaitByLoop */
-        c->budget -= (s32)(c->r[0] * 4);
+    case 0x00:  /* SoftReset */
+        return bios_softreset(c);
+    case 0x03: { /* WaitByLoop: SUB r0,1 / BGT, 4 cycles an iteration; r0 <= 0 still runs once */
+        u32 n = (s32)c->r[0] > 0 ? c->r[0] : 1;
+        c->budget -= n < 0x1FFFFFFFu ? (s32)(n * 4) : 0x7FFFFFFC;
+        c->r[0] = (s32)c->r[0] > 0 ? 0 : c->r[0] - 1;
         return 0;
+    }
     case 0x04:  /* IntrWait */
     case 0x05:  /* VBlankIntrWait */
         if (num == 5) { c->r[0] = 1; c->r[1] = 1; }
@@ -248,10 +452,12 @@ u32 dsr_swi(Cpu *c, u32 num, u32 next) {
         c->write_slow(c, 0x04000208, 1, 4);     /* the BIOS enables IME while it waits */
         c->t = 0;
         return c->bios_base + BIOS_INTRWAIT;    /* the wait loop runs as BIOS code (bios_exec) */
-    case 0x06:  /* Halt */
+    case 0x06:  /* Halt (the ARM9's goes through CP15 with r0 = 0) */
+        if (c->arch == 5) c->r[0] = 0;
         c->halted = 1;
         return next;
     case 0x07:  /* Sleep (ARM7) */
+        if (c->arch == 5) goto unimplemented;
         c->halted = 1;
         return next;
     case 0x08: { /* SoundBias (ARM7): SOUNDBIAS to 0 (r0 = 0) or 200h in steps of 1, r1 delay loops per step */
@@ -277,14 +483,16 @@ u32 dsr_swi(Cpu *c, u32 num, u32 next) {
     case 0x0B: { /* CpuSet */
         u32 src = c->r[0], dst = c->r[1], ctl = c->r[2], n = ctl & 0x1FFFFF;
         int fill = (ctl >> 24) & 1, word = (ctl >> 26) & 1;
+        if (bios_src_protected(c, src, fill ? (word ? 4 : 2) : n * (word ? 4 : 2))) return 0;
         if (word) { u32 v = rd32(c, src); for (u32 i = 0; i < n; i++) { if (!fill) v = rd32(c, src + 4 * i); wr32(c, dst + 4 * i, v); } }
         else { u32 v = rd16(c, src); for (u32 i = 0; i < n; i++) { if (!fill) v = rd16(c, src + 2 * i); wr16(c, dst + 2 * i, v); } }
         c->budget -= (s32)n;
         return 0;
     }
     case 0x0C: { /* CpuFastSet */
-        u32 src = c->r[0], dst = c->r[1], ctl = c->r[2], n = ((ctl & 0x1FFFFF) + 7) & ~7u;
+        u32 src = c->r[0], dst = c->r[1], ctl = c->r[2], n = ctl & 0x1FFFFF;     /* any word count, unlike the GBA's multiples of 8 */
         int fill = (ctl >> 24) & 1;
+        if (bios_src_protected(c, src, fill ? 4 : n * 4)) return 0;
         u32 v = rd32(c, src);
         for (u32 i = 0; i < n; i++) { if (!fill) v = rd32(c, src + 4 * i); wr32(c, dst + 4 * i, v); }
         c->budget -= (s32)n;
@@ -294,10 +502,14 @@ u32 dsr_swi(Cpu *c, u32 num, u32 next) {
         c->r[0] = isqrt(c->r[0]);
         return 0;
     case 0x0E: { /* GetCRC16 */
-        u16 crc = (u16)c->r[0];
-        u32 a = c->r[1], n = c->r[2];
-        for (u32 i = 0; i < n; i++) { u8 b = (u8)rd8(c, a + i); crc = crc16_update(crc, &b, 1); }
+        u32 crc = c->r[0] & 0xFFFF, a = c->r[1], n = c->r[2];
+        for (u32 i = 0; i < n; i += 2) {        /* by halfwords: r3 ends as the last one */
+            u32 h = rd16(c, a + i);
+            crc = crc16_update(crc16_update(crc, h), h >> 8);
+            c->r[3] = h;
+        }
         c->r[0] = crc;
+        c->budget -= (s32)n;
         return 0;
     }
     case 0x0F:  /* IsDebugger */
@@ -306,14 +518,31 @@ u32 dsr_swi(Cpu *c, u32 num, u32 next) {
     case 0x10:
         bios_bitunpack(c, c->r[0], c->r[1], c->r[2]);
         return 0;
-    case 0x11:
-        bios_lz77(c, c->r[0], c->r[1]);
+    case 0x11:  /* LZ77UnCompReadNormalWrite8bit */
+        bios_decompress(c, DEC_LZ77);
         return 0;
-    case 0x14:
-        bios_rl(c, c->r[0], c->r[1]);
+    case 0x14:  /* RLUnCompReadNormalWrite8bit */
+        bios_decompress(c, DEC_RL);
         return 0;
-    case 0x1F:  /* CustomHalt (ARM7) */
-        c->halted = 1;
+    case 0x12:  /* LZ77UnCompReadByCallbackWrite16bit */
+    case 0x13:  /* HuffUnCompReadByCallback */
+    case 0x15:  /* RLUnCompReadByCallbackWrite16bit */
+        return bios_decompress_cb(c, num, next);
+    case 0x16:  /* Diff8bitUnFilterWrite8bit (ARM9) */
+    case 0x18:  /* Diff16bitUnFilter (ARM9) */
+        if (c->arch == 4) goto unimplemented;
+        bios_unfilter(c, c->r[0], c->r[1], num == 0x18);
+        return 0;
+    case 0x1A:  /* GetSineTable (ARM7) */
+        if (c->arch == 5) goto unimplemented;
+        c->r[0] = bios_sine(c->r[0]);
+        return 0;
+    case 0x1F:
+        if (c->arch == 5) {     /* CustomPost: POSTFLG */
+            c->write_slow(c, 0x04000300, c->r[0], 4);
+            return 0;
+        }
+        c->write_slow(c, 0x04000301, c->r[2] & 0xFF, 1);        /* CustomHalt: HALTCNT, 80h halt, C0h sleep */
         return next;
     default:
     unimplemented:
@@ -402,6 +631,17 @@ static int bios_exec(Cpu *c) {
         c->budget = 0;
         return 0;
     }
+    if (off == BIOS_DEC_RET) {  /* a decompression callback returned its result in r0 */
+        BiosJob *j = &jobs[c->arch == 5];
+        if (j->active) {
+            u32 pc = dec_run(c, j, c->r[0]);
+            if (pc) { c->r[15] = pc; c->budget -= 6; return 1; }
+            j->active = 0;
+            dec_return(c, j);
+            c->r[15] = j->ret_pc; c->t = j->ret_t;
+            return 1;
+        }
+    }
     if (off == 0x18) {          /* stmfd sp!, {r0-r3, r12, lr}; ldr pc, [handler] */
         u32 sp = c->r[13] - 24;
         u32 regs[6] = {c->r[0], c->r[1], c->r[2], c->r[3], c->r[12], c->r[14]};
@@ -480,4 +720,5 @@ void dsr_reset(Cpu *c, int arch, u32 entry) {
     c->cp15_dtcm = 0x0300000Au;     /* what the firmware leaves: DTCM at 0x03000000? (games set their own) */
     c->irq_check_addr = arch == 5 ? 0x03003FF8u : 0x0380FFF8u;
     c->exit_pc = 0xFFFFFFFFu;
+    memset(&jobs[arch == 5], 0, sizeof jobs[0]);
 }

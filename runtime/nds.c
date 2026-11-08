@@ -378,12 +378,7 @@ static u8 spi_transfer(Nds *s, u8 b) {
         else if (s->pm_index & 0x80) out = s->pm_regs[s->pm_index & 7];
         else s->pm_regs[s->pm_index & 7] = b;
     } else if (dev == 1) {
-        if (pos == 0) { s->spi_cmd = b; s->spi_addr = 0; }
-        else if (s->spi_cmd == 0x03 || s->spi_cmd == 0x0B) {
-            if (pos <= 3) s->spi_addr = (s->spi_addr << 8) | b;
-            else if (s->spi_cmd == 0x03 || pos > 4) out = s->firmware[s->spi_addr++ & 0x3FFFF];
-        } else if (s->spi_cmd == 0x9F) out = (u8[]){0x20, 0x40, 0x12}[(pos - 1) % 3];
-        else if (s->spi_cmd == 0x05) out = 0;
+        out = firmware_spi_byte(s, pos, b, !(s->spicnt & 0x800));
     } else if (dev == 2) {
         if (b & 0x80) {
             int ch = (b >> 4) & 7;
@@ -632,12 +627,14 @@ static void io_write8(Nds *s, int cpu, u32 a, u8 v) {
 /* The subsystems in files of their own get the first look at each I/O access. */
 static int sub_io_read(Nds *s, int cpu, u32 off, int size, u32 *v) {
     return rtc_io_read(s, cpu, off, size, v) || save_io_read(s, cpu, off, size, v) ||
-           sound_io_read(s, cpu, off, size, v) || gpu3d_io_read(s, cpu, off, size, v);
+           sound_io_read(s, cpu, off, size, v) || gpu3d_io_read(s, cpu, off, size, v) ||
+           wifi_io_read(s, cpu, off, size, v) || dsi_io_read(s, cpu, off, size, v);
 }
 
 static int sub_io_write(Nds *s, int cpu, u32 off, int size, u32 v) {
     return rtc_io_write(s, cpu, off, size, v) || save_io_write(s, cpu, off, size, v) ||
-           sound_io_write(s, cpu, off, size, v) || gpu3d_io_write(s, cpu, off, size, v);
+           sound_io_write(s, cpu, off, size, v) || gpu3d_io_write(s, cpu, off, size, v) ||
+           wifi_io_write(s, cpu, off, size, v) || dsi_io_write(s, cpu, off, size, v);
 }
 
 int nds_option(Nds *s, const char *name, const char *value) {
@@ -692,38 +689,12 @@ static void log_miss(Cpu *c, u32 pc, u32 thumb) {
 }
 
 /* ---- the machine -------------------------------------------------------------------- */
-static void make_firmware(Nds *s) {
-    u8 *f = s->firmware = malloc(0x40000);
-    memset(f, 0xFF, 0x40000);
-    memset(f, 0, 0x200);
-    f[0x20] = 0xC0; f[0x21] = 0x7F;                 /* user settings at 0x7FC0 * 8 = 0x3FE00 */
-    f[0x1D] = 0xFF;                                 /* console type: DS */
-    for (int copy = 0; copy < 2; copy++) {
-        u8 *u = f + 0x3FE00 + copy * 0x100;
-        memset(u, 0, 0x100);
-        u[0x00] = 5; u[0x02] = 11; u[0x03] = 1; u[0x04] = 1;
-        const char *name = "dsnative";
-        for (int i = 0; name[i]; i++) u[0x06 + 2 * i] = (u8)name[i];
-        u[0x1A] = 8;
-        u16 cal[8] = {0x200, 0x200, 0x20, 0x20, 0xE00, 0x800, 0xE0, 0xA0};   /* touch calibration */
-        memcpy(u + 0x58, &cal[0], 2); memcpy(u + 0x5A, &cal[1], 2); u[0x5C] = 0x20; u[0x5D] = 0x20;
-        memcpy(u + 0x5E, &cal[4], 2); memcpy(u + 0x60, &cal[5], 2); u[0x62] = 0xE0; u[0x63] = 0xA0;
-        u[0x64] = 0x01 | 0x08;                      /* English, GBA screen bottom */
-        u[0x66] = 26;                               /* year 2026 */
-        u[0x70] = (u8)copy;
-        u16 crc = 0xFFFF;
-        for (int i = 0; i < 0x70; i++) { crc ^= u[i]; for (int k = 0; k < 8; k++) crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1; }
-        memcpy(u + 0x72, &crc, 2);
-    }
-}
-
 Nds *nds_create(const u8 *rom, u32 rom_size) {
     Nds *s = calloc(1, sizeof *s);
     s->ram = calloc(1, 0x400000);
     s->vram = calloc(1, 0xA4000);
     s->rom = rom; s->rom_size = rom_size;
     s->chip_id = 0x00001FC2;
-    make_firmware(s);
     for (int k = 0; k < 2; k++) {
         Cpu *c = k ? &s->arm7 : &s->arm9;
         dsr_reset(c, k ? 4 : 5, 0);
@@ -735,7 +706,7 @@ Nds *nds_create(const u8 *rom, u32 rom_size) {
     }
     s->wramcnt = 3;
     nds_remap(s);
-    rtc_init(s); save_init(s); sound_init(s); gpu3d_init(s);
+    firmware_init(s); wifi_init(s); dsi_init(s); rtc_init(s); save_init(s); sound_init(s); gpu3d_init(s);
     return s;
 }
 
@@ -773,7 +744,7 @@ void nds_direct_boot(Nds *s, const u8 *arm9, u32 arm9_len) {
     w16(s, 0x027FFC08, hcrc); w16(s, 0x027FFC0A, scrc);
     w16(s, 0x027FFC10, 0x5835); w16(s, 0x027FFC30, 0xFFFF); w16(s, 0x027FFC40, 0x0001);
     memcpy(s->ram + 0x3FFE00, h, 0x170);
-    memcpy(s->ram + 0x3FFC80, s->firmware + 0x3FE00, 0x70);
+    memcpy(s->ram + 0x3FFC80, s->fw.data + FW_USER_SETTINGS, 0x70);
     s->io[0][0x300] = s->io[1][0x300] = 1;      /* POSTFLG */
     s->wramcnt = 3;
     s->powcnt1 = 0x820F;
