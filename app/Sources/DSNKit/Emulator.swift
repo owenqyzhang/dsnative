@@ -106,8 +106,10 @@ public final class Emulator: @unchecked Sendable {
     public var currentStatus: Status { lock.withLock { status } }
 
     /// Runs `frames` frames as fast as possible, with scripted input, on the calling thread
-    /// (smoke tests). Stops early when both CPUs have stopped, as dsn_headless does.
-    public func run(frames: Int, script: InputScript) {
+    /// (smoke tests); `afterFrame` runs on that thread after each frame, before the next one
+    /// (the smoke run drains the audio ring there). Stops early when both CPUs have stopped,
+    /// as dsn_headless does.
+    public func run(frames: Int, script: InputScript, afterFrame: (() -> Void)? = nil) {
         var held: DSButtons = []
         for f in 0..<frames {
             let change = script.changes(at: f)
@@ -118,6 +120,7 @@ public final class Emulator: @unchecked Sendable {
                 if let touch { scriptTouch = touch }
             }
             step()
+            afterFrame?()
             let st = core.stopped
             if st.arm9 && st.arm7 { break }
         }

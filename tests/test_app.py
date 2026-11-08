@@ -151,13 +151,30 @@ def main():
         if os.path.exists(f):
             os.remove(f)
     app = run([exe, '--smoke', '100', '--png', app_png, '--keys', KEYS, '--save', save, OPTIONS[2], OPTIONS[3]], cwd=OUT)
+    ref_wav = os.path.join(OUT, 'ref.wav')
     ref = run([os.path.join(game, 'dsn_headless'), rom, os.path.join(game, 'arm9.bin'), '--frames', '100', '--png', ref_png,
-              '--keys', KEYS, *OPTIONS], cwd=OUT)
+              '--keys', KEYS, '--wav', ref_wav, *OPTIONS], cwd=OUT)
     debug = lambda r: [l for l in r.stdout.splitlines() if l.startswith('[debug] ')]   # noqa: E731
     check(app.returncode == 0, f'smoke run exited {app.returncode}: {app.stderr[-500:]}')
     check(debug(app) == debug(ref) and 'DONE' in ''.join(debug(app)), 'smoke debug output differs from dsn_headless')
     check('[debug] sprite 000000a0 0000006c' in debug(app), 'the scripted keys did not move the sprite')
     check(os.path.exists(save) and os.path.getsize(save) == SAVE_SIZE, 'smoke run left no 512 KB save file')
+    # The app's audio ring against the WAV dsn_headless records for the same 100 frames: the same
+    # number of frames (about 548 per video frame) and the same peak, and the test ROM's tones
+    # make the peak non-zero.
+    m = re.search(r'smoke audio: frames=(\d+) peak=(\d+)', app.stderr)
+    if not m or not os.path.exists(ref_wav):
+        failures.append('no "smoke audio" line from the app, or no WAV from dsn_headless')
+    else:
+        import wave
+        with wave.open(ref_wav, 'rb') as w:
+            n_ref = w.getnframes()
+            samples = struct.unpack('<%dh' % (n_ref * 2), w.readframes(n_ref))
+        peak_ref = max((abs(s) for s in samples), default=0)
+        n_app, peak_app = int(m.group(1)), int(m.group(2))
+        check(abs(n_app - n_ref) <= 600 and abs(n_app - 100 * 548) <= 1200,
+              f'audio frames: the app read {n_app}, the WAV holds {n_ref} (about {100 * 548} expected)')
+        check(peak_ref > 0 and abs(peak_app - peak_ref) <= 2, f'audio peak: the app {peak_app}, the WAV {peak_ref}')
     if os.path.exists(app_png) and os.path.exists(ref_png):
         w, h, px = read_png(app_png)
         check((w, h) == (256, 384), f'PNG is {w}x{h}, expected 256x384')

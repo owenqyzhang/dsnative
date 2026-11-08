@@ -42,11 +42,11 @@ struct EmulatorTests {
         #expect(saved.count == 0x80000)
         #expect(saved.contains { $0 != 0xFF })
 
-        // the audio ring, as far as this ROM goes: whatever the mixer has produced (nothing until
-        // the runtime has sound), then silence, and never a sample out of range. Order, the
-        // channel split, the scale and the wraps are tests/unit/test_audio_ring.c's. Still to
-        // add once sound is in the runtime: about 548 frames read per video frame, and a
-        // non-zero sample from a ROM that plays one.
+        // the audio ring, as far as this paced run goes: whatever the mixer has produced, then
+        // silence, and never a sample out of range. Order, the channel split, the scale and the
+        // wraps are tests/unit/test_audio_ring.c's; that the right amount of real sound arrives
+        // (about 548 frames per video frame, the test ROM's tones) is checked by
+        // tests/test_app.py's smoke run against dsn_headless's WAV.
         var left = [Float](repeating: 9, count: 512), right = left
         let real = e.core.audioTap.read(left: &left, right: &right, frames: 512)
         #expect((0...512).contains(real))
