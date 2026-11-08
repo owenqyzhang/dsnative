@@ -2,6 +2,9 @@
 generated code) and run; it prints what it checked and exits non-zero on a failure.
 
     python3 tests/test_units.py [name ...]
+
+DSN_SANITIZE=1 builds them with AddressSanitizer and UndefinedBehaviorSanitizer (shift checks on),
+stopping at the first finding.
 """
 import glob
 import os
@@ -24,7 +27,8 @@ def main():
     for t in tests:
         name = os.path.basename(t)[:-2]
         exe = os.path.join(OUT, name)
-        b = subprocess.run(['cc', '-O1', '-g', '-Wall', '-Wno-unused-function', '-I', RT, '-o', exe, t] + runtime + ['-lm'],
+        san = ['-fsanitize=undefined,address', '-fno-sanitize-recover=all'] if os.environ.get('DSN_SANITIZE') else []
+        b = subprocess.run(['cc', '-O1', '-g', '-Wall', '-Wno-unused-function', *san, '-I', RT, '-o', exe, t] + runtime + ['-lm'],
                            capture_output=True, text=True)
         if b.returncode:
             failed += 1

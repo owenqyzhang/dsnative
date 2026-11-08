@@ -270,8 +270,9 @@ static void vertex(Nds *s, s16 x, s16 y, s16 z) {
     if (g->prim < 0) return;
     if ((g->texparam >> 30) == 3) {     /* texture coordinates from the vertex */
         const s32 *m = g->tex;
-        g->s = (s16)(g->raw_s + (((s64)x * m[0] + (s64)y * m[4] + (s64)z * m[8]) >> 24));
-        g->t = (s16)(g->raw_t + (((s64)x * m[1] + (s64)y * m[5] + (s64)z * m[9]) >> 24));
+        /* (Vx Vy Vz 1.0) * the matrix: 12 + 12 fraction bits shifted down to S's 4, plus S, T */
+        g->s = (s16)(g->raw_s + (((s64)x * m[0] + (s64)y * m[4] + (s64)z * m[8]) >> 20));
+        g->t = (s16)(g->raw_t + (((s64)x * m[1] + (s64)y * m[5] + (s64)z * m[9]) >> 20));
     }
     s32 c[4];
     xform(clip_mtx(g), x, y, z, 0x1000, c);
@@ -306,7 +307,7 @@ static void vertex(Nds *s, s16 x, s16 y, s16 z) {
 
 /* ---- lighting --------------------------------------------------------------------------- */
 static void unpack10(u32 p, s32 *v) {   /* three 1.9 components, as 12-bit fractions */
-    v[0] = sext(p, 10) << 3; v[1] = sext(p >> 10, 10) << 3; v[2] = sext(p >> 20, 10) << 3;
+    v[0] = sext(p, 10) * 8; v[1] = sext(p >> 10, 10) * 8; v[2] = sext(p >> 20, 10) * 8;
 }
 
 static void light_vector(Gpu3d *g, u32 p) {
@@ -329,8 +330,10 @@ static void normal(Gpu3d *g, u32 p) {
     unpack10(p, n);
     if ((g->texparam >> 30) == 2) {     /* texture coordinates from the normal */
         const s32 *m = g->tex;
-        g->s = (s16)(g->raw_s + (((s64)n[0] * m[0] + (s64)n[1] * m[4] + (s64)n[2] * m[8]) >> 24));
-        g->t = (s16)(g->raw_t + (((s64)n[0] * m[1] + (s64)n[1] * m[5] + (s64)n[2] * m[9]) >> 24));
+        /* the normal as a 12-bit fraction, like the vertex above: a unit normal times a matrix of
+         * half the texture size lands half the texture away, as GBATEK's reflection mapping wants */
+        g->s = (s16)(g->raw_s + (((s64)n[0] * m[0] + (s64)n[1] * m[4] + (s64)n[2] * m[8]) >> 20));
+        g->t = (s16)(g->raw_t + (((s64)n[0] * m[1] + (s64)n[1] * m[5] + (s64)n[2] * m[9]) >> 20));
     }
     xform3(g->dir, n, nv);
     const s64 one = 31 * 4096;
@@ -440,7 +443,7 @@ static void execute(Nds *s, u8 cmd, const u32 *p) {
         } else { g->s = g->raw_s; g->t = g->raw_t; }
         break;
     case 0x23: vertex(s, (s16)p[0], (s16)(p[0] >> 16), (s16)p[1]); break;
-    case 0x24: vertex(s, (s16)(sext(p[0], 10) << 6), (s16)(sext(p[0] >> 10, 10) << 6), (s16)(sext(p[0] >> 20, 10) << 6)); break;
+    case 0x24: vertex(s, (s16)(sext(p[0], 10) * 64), (s16)(sext(p[0] >> 10, 10) * 64), (s16)(sext(p[0] >> 20, 10) * 64)); break;
     case 0x25: vertex(s, (s16)p[0], (s16)(p[0] >> 16), g->vz); break;
     case 0x26: vertex(s, (s16)p[0], g->vy, (s16)(p[0] >> 16)); break;
     case 0x27: vertex(s, g->vx, (s16)p[0], (s16)(p[0] >> 16)); break;

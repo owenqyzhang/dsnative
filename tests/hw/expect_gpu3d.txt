@@ -15,3 +15,10 @@ fifo ok
 fifodone 06000000
 gxirq ok
 gxdma 00001000 00002000 00003000
+# a bank mapped as a texture slot or texture palette hides its LCDC window and keeps its contents
+texvram 00000000 00000001
+texpal 00000000 00000001 00000000 00000001 00000000 00000001
+# seven textured quads, one per format: 7 polygons, 28 vertices
+texpoly 001c0007
+# every control bit of DISP3DCNT reads back
+disp3d 000049ff
