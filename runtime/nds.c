@@ -362,6 +362,13 @@ static u32 card_read(Nds *s) {
 }
 
 /* ---- SPI (ARM7): power manager, firmware, touch screen ---------------------------- */
+/* The calibration's straight line from pixel 0x1F (ADC 0x200), in signed arithmetic: pixels left of
+ * and above it read smaller (unsigned, they wrapped to a huge value), and the 12-bit converter clips. */
+static u16 touch_adc(int px, int adc_span, int px_span) {
+    int v = 0x200 + (px - 0x1F) * adc_span / px_span;
+    return (u16)(v < 0 ? 0 : v > 0xFFF ? 0xFFF : v);
+}
+
 static u8 spi_transfer(Nds *s, u8 b) {
     int dev = (s->spicnt >> 8) & 3;
     u8 out = 0;
@@ -381,9 +388,10 @@ static u8 spi_transfer(Nds *s, u8 b) {
         if (b & 0x80) {
             int ch = (b >> 4) & 7;
             u32 adc = 0;
-            /* calibration from the firmware's user settings: ADC 0x200 at pixel 0x20 to ADC 0xE00/0x800 at 0xE0/0xA0 */
-            if (ch == 5) adc = s->touch_down ? 0x200 + (u32)(s->touch_x - 0x1F) * (0xE00 - 0x200) / (0xE0 - 0x20) : 0;
-            else if (ch == 1) adc = s->touch_down ? 0x200 + (u32)(s->touch_y - 0x1F) * (0x800 - 0x200) / (0xA0 - 0x20) : 0xFFF;
+            /* calibration from the firmware's user settings: ADC 0x200 at pixel 0x20 to ADC 0xE00/0x800 at 0xE0/0xA0
+             * (the settings count pixels from 1: 0-based, 0x1F to 0xDF/0x9F, as touch_adc has it) */
+            if (ch == 5) adc = s->touch_down ? touch_adc(s->touch_x, 0xE00 - 0x200, 0xE0 - 0x20) : 0;
+            else if (ch == 1) adc = s->touch_down ? touch_adc(s->touch_y, 0x800 - 0x200, 0xA0 - 0x20) : 0xFFF;
             else adc = 0x800;
             s->touch_adc = (u16)(adc & 0xFFF);
             out = 0;

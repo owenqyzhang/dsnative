@@ -8,3 +8,4 @@ out/
 data/
 .DS_Store
 missing.txt
+.build/
