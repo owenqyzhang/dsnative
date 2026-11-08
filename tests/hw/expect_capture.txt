@@ -1,0 +1,20 @@
+# tests/hw/capture_9.c: display capture into spare VRAM bank B, checked on the ARM9 against GBATEK's
+# formulas before each checksum (FNV-1a over the halfwords; the Python of this file's author worked each
+# one out from the formulas as well). Takes a dozen frames after the other subsystems' tests, so the run
+# is longer than test_hw.py's default.
+args: --frames 160
+# DISPCAPCNT 6FFFFFFFh reads back with the unused bits clear
+capture_reg 6f3f1f1f
+# the enable bit: clear when idle, set right after arming it in VBlank, set in the middle of the capture
+# frame, clear after line 192
+capture_busy 00000000 00000001 00000001 00000000
+# source A with no layers on: the backdrop, opaque, 256x192, nothing written after it
+capture_a ok 9e99ddc5
+# source B alone: a copy of bank A, the Mandelbrot set on the screen
+capture_b ok 2a17b45d
+# A at 8/16 + B at 8/16 where B has no alpha bit: only A's half
+capture_blend ok 2e769dc5
+# A at 8/16 + the main memory display FIFO at 8/16, DMA in main memory display timing from RAM
+capture_fifo ok e782fdc5
+# 128x128 at write offset 0x8000: packed 128 pixels a line, the rest of the bank as it was
+capture_size ok 7ba45dc5

@@ -628,13 +628,15 @@ static void io_write8(Nds *s, int cpu, u32 a, u8 v) {
 static int sub_io_read(Nds *s, int cpu, u32 off, int size, u32 *v) {
     return rtc_io_read(s, cpu, off, size, v) || save_io_read(s, cpu, off, size, v) ||
            sound_io_read(s, cpu, off, size, v) || gpu3d_io_read(s, cpu, off, size, v) ||
-           wifi_io_read(s, cpu, off, size, v) || dsi_io_read(s, cpu, off, size, v);
+           wifi_io_read(s, cpu, off, size, v) || dsi_io_read(s, cpu, off, size, v) ||
+           capture_io_read(s, cpu, off, size, v);
 }
 
 static int sub_io_write(Nds *s, int cpu, u32 off, int size, u32 v) {
-    return rtc_io_write(s, cpu, off, size, v) || save_io_write(s, cpu, off, size, v) ||
+    return gpu2d_io_write(s, cpu, off, size, v) || rtc_io_write(s, cpu, off, size, v) || save_io_write(s, cpu, off, size, v) ||
            sound_io_write(s, cpu, off, size, v) || gpu3d_io_write(s, cpu, off, size, v) ||
-           wifi_io_write(s, cpu, off, size, v) || dsi_io_write(s, cpu, off, size, v);
+           wifi_io_write(s, cpu, off, size, v) || dsi_io_write(s, cpu, off, size, v) ||
+           capture_io_write(s, cpu, off, size, v);
 }
 
 int nds_option(Nds *s, const char *name, const char *value) {
@@ -777,6 +779,9 @@ static void run_cycles(Nds *s, u32 cycles) {
 
 static void line_start(Nds *s, u32 line) {
     s->vcount = line;
+    capture_line_start(s, line);
+    if (line < SCREEN_H && capture_fifo_wanted(s))      /* main memory display: the DMA sends 8 pixels a burst */
+        for (int i = 0; i < SCREEN_W / 8; i++) dma_trigger(s, 0, 4);
     for (int cpu = 0; cpu < 2; cpu++) {
         u16 ds = s->dispstat[cpu];
         u32 match = ((ds >> 8) & 0xFF) | ((ds & 0x80u) << 1);

@@ -9,6 +9,7 @@
 #include "firmware.h"
 #include "wifi.h"
 #include "dsi.h"
+#include "capture.h"
 
 #define SCREEN_W 256
 #define SCREEN_H 192
@@ -28,6 +29,10 @@ typedef struct {
     u32 src, dst, cnt;          /* as written */
     u32 isrc, idst, icount;     /* internal, latched at start */
 } Dma;
+
+/* the internal reference point of an affine BG, per axis (0 X, 1 Y) as of its own `line`, and a write to
+ * BGxX/BGxY waiting to be copied with the line it takes effect in (gpu2d.c) */
+typedef struct { s32 v[2], line[2], pend[2]; u8 dirty[2]; } BgRef;
 
 typedef struct {
     u16 reload, ctrl, counter;
@@ -77,7 +82,7 @@ typedef struct Nds {
     char dbg[1024]; int dbg_len;
     void (*debug_line)(const char *s);
     u64 time;                   /* bus (ARM7) cycles since start */
-    /* subsystems in files of their own (rtc.c, save.c, sound.c, gpu3d.c, firmware.c, wifi.c, dsi.c) */
+    /* subsystems in files of their own (rtc.c, save.c, sound.c, gpu3d.c, firmware.c, wifi.c, dsi.c, capture.c) */
     Rtc rtc;
     Save save;
     Sound sound;
@@ -85,6 +90,8 @@ typedef struct Nds {
     Firmware fw;
     Wifi wifi;
     Dsi dsi;
+    Capture cap;
+    BgRef bgref[2][2];          /* 2D engines: per engine, BG2 and BG3 */
 } Nds;
 
 Nds *nds_create(const u8 *rom, u32 rom_size);
@@ -104,5 +111,7 @@ void nds_gxfifo_dma(Nds *s);
 
 /* gpu2d.c */
 void gpu2d_render_line(Nds *s, int engine, int line, u32 *out);
+/* Notes writes to the affine reference points; never claims an access (returns 0). */
+int gpu2d_io_write(Nds *s, int cpu, u32 off, int size, u32 v);
 u8 *vram_engine_ptr(Nds *s, int engine, int obj, u32 offset);    /* engine-relative VRAM */
 #endif
