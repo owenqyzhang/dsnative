@@ -11,8 +11,8 @@ attached).
 
 This is a proof of concept. It runs homebrew from start to finish. A commercial game (Pokémon
 Black 2) now runs through boot on both CPUs, plays its intro movie with sound, shows its textured 3D
-title scene and its main menu with the saved game, loads the save into the overworld and opens the
-party screen: see [Status](#status) and [the roadmap](docs/design.md#roadmap). The other Pokémon
+title scene and its main menu with the saved game, loads the save into the overworld, opens the
+menus, saves the game (the new save loads again) and plays a wild battle: see [Status](#status) and [the roadmap](docs/design.md#roadmap). The other Pokémon
 games (Black, White, White 2, HeartGold, SoulSilver) get as far as their title scenes or first
 screens and the beginning of a new game before they reach code they decrypt in RAM, which the
 interpreter fallback runs.

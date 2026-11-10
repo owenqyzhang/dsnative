@@ -486,6 +486,13 @@ What a Nitro SDK game needs that homebrew doesn't, roughly in the order a game h
 - **The rest of the 2D engines and display capture**: done (see above). With them Pokémon Black
   2's title scene reaches the screen, textured, and its main menu shows the saved game.
 - **Wi-Fi**: done as a stub (see above): the SDK initializes and reports no network.
+- **Black 2 play-tested** (headless, on a copy of a real save): the intro movie, the title, Continue into the overworld,
+  walking, the X menu (touch), the party screen, saving through the save-chip model (the game writes about 4 KB
+  of changes and the file loads again), and a wild battle with the intro camera, the command menu and the
+  move list. The enemy in a wild battle looks like a white silhouette only when it is a pale Pokémon (Tynamo); the
+  player's Pokémon is shaded dark when seen from behind and its palette is modulated by a slow wave (about 78 frames)
+  that the game computes: both were checked against the screens and nothing points at the 3D or 2D engines. Not
+  yet exercised: trainer battles, the Pokédex, the Bag, other menus' side effects, Wi-Fi features (stubbed).
 - **Game profiles**: per game (by game code and revision), the extra entry points, known
   data-in-code regions and patches. Like nxnative's `dm/games/<id>/`.
 - **DSi-enhanced titles** run in DS mode (Black 2 is one); DSi mode is out of scope for now.
