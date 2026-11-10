@@ -148,13 +148,15 @@ The test ROM (`python3 tests/hw/build.py build/hwtest`, 33 KB) is nearly a best 
 A commercial game is not like that. For Pokémon Black 2 the generated C is 241 MB in 179 files,
 `libdsn.a` 136 MB, the executable 120 MB and the
 bundle 627 MB, almost all of it the 512 MB ROM. A clean `--platform macos` build took 1:43 of
-wall time on an M6 (515 s of CPU). Expect:
+wall time on an M6 (515 s of CPU); `--platform ios-sim` took 2:12 and `tvos-sim` 2:08 (each
+with a library of its own, and a boot, install, launch and screenshot), `ios` and `tvos` about 1:25. Expect:
 
 - a long C compile per platform at `-O2` (about 100 s here on all cores): raise `--jobs` on an
   idle machine, or use `--opt O1` or `O0` for a first look (the library is then slower to run);
 - the same again for every platform, since each has a library of its own;
 - more than 100 MB of library linked into the executable, and the whole ROM (up to 512 MB) in the
-  bundle, which the runtime reads into memory at start;
+  bundle, which the app maps read-only instead of reading it into memory (the Black 2 apps use
+  238 MB resident on the iPhone simulator and 188 MB on the Apple TV one);
 - a simulator or device build that spends most of its time in `make`, not in Xcode: the Swift
   part is a few seconds either way.
 

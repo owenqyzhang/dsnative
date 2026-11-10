@@ -526,7 +526,11 @@ route.
 Built and running for macOS, iOS/iPadOS and tvOS on the homebrew test ROM. A Pokémon Black 2 Mac
 app also builds (`tools/build_app.py`: about 100 s, 515 s of CPU, on an M6; 241 MB of generated
 C, a 136 MB `libdsn.a`, a 120 MB executable, and the 512 MB ROM in the bundle); the iOS and tvOS
-builds of Black 2 are untried and nothing has run on a physical device. It is a Swift package, `app/`: DSNKit holds
+builds of Black 2 build too: the simulator apps (iPhone 17 and Apple TV 4K) run its intro and use 238 MB
+and 188 MB resident, since the app maps the ROM read-only (`dsn_core.c`) instead of reading
+512 MB into the heap; the device builds (`--platform ios` and `tvos`, about 85 s each after the
+simulator ones) are unsigned, and nothing has run on a physical device. On the Mac the app plays the
+game (wild and trainer battles, the bag) at a steady 60 fps. It is a Swift package, `app/`: DSNKit holds
 everything shared, DSNCore is a thin C shim, and DSNative is the Mac app; the iPhone/iPad and Apple
 TV hosts come from an Xcode project that XcodeGen generates from `app/project.yml`. DSNCore hides
 `Nds` from Swift, because its large fixed arrays import as huge tuples. It boots a game as

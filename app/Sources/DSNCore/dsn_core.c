@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "include/dsn_core.h"
 /* by path: SwiftPM keeps header search paths inside the package */
 #include "../../../runtime/nds.h"
@@ -52,12 +56,39 @@ static u8 *load(const char *path, u32 *len, char *err, int err_len) {
     return b;
 }
 
+/* The ROM, mapped read-only: the runtime only reads it, and a game's ROM can be 512 MB, which on an
+ * iPhone or Apple TV would count against the app's memory limit if it were read into the heap. Mapped
+ * pages are clean and the system drops and refetches them as it needs. A zero page after the end
+ * keeps a read that runs a few bytes past it harmless, as the heap copy's padding did. */
+static size_t mapped_size(size_t n) { size_t page = (size_t)getpagesize(); return (n + page - 1) / page * page + page; }
+
+static u8 *map_rom(const char *path, u32 *len, char *err, int err_len) {
+    int fd = open(path, O_RDONLY);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0 || st.st_size > 0x7FFFFFFF) {
+        snprintf(err, (size_t)err_len, "cannot open %s", path);
+        if (fd >= 0) close(fd);
+        return 0;
+    }
+    size_t n = (size_t)st.st_size, total = mapped_size(n);
+    u8 *b = mmap(0, total, PROT_READ, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (b == MAP_FAILED || mmap(b, n, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) == MAP_FAILED) {
+        snprintf(err, (size_t)err_len, "cannot read %s", path);
+        if (b != MAP_FAILED) munmap(b, total);
+        close(fd);
+        return 0;
+    }
+    close(fd);
+    *len = (u32)n;
+    return b;
+}
+
 DsnCore *dsn_core_create(const char *rom_path, const char *arm9_path, char *err, int err_len) {
     DsnCore *c = calloc(1, sizeof *c);
-    c->rom = load(rom_path, &c->rom_len, err, err_len);
+    c->rom = map_rom(rom_path, &c->rom_len, err, err_len);
     if (c->rom) c->arm9 = load(arm9_path, &c->arm9_len, err, err_len);
     if (c->rom && c->rom_len < 0x200) snprintf(err, (size_t)err_len, "%s is too small to be a DS ROM", rom_path);
-    if (!c->rom || !c->arm9 || c->rom_len < 0x200) { free(c->rom); free(c->arm9); free(c); return 0; }
+    if (!c->rom || !c->arm9 || c->rom_len < 0x200) { if (c->rom) munmap(c->rom, mapped_size(c->rom_len)); free(c->arm9); free(c); return 0; }
     c->s = nds_create(c->rom, c->rom_len);
     return c;
 }
