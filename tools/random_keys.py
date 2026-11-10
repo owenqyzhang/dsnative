@@ -6,7 +6,8 @@ Prints a --keys string (F:KEYS,... with a release at F:) that is the same for th
 Keys are Black 2's letters: a b x y l r s e and directions U D W E. Before --start the script
 only taps A every --tap frames so the title and menus are reached; afterwards it presses one or
 two random buttons, each held for a random number of frames up to --hold, with gaps up to --gap.
-Nothing about the game is assumed, so the output is usable with any DS game.
+The defaults suit Pokemon Black 2 (A every 100 frames reaches its menus by frame 900); other games
+need their own --start and --tap.
 """
 import argparse
 import random

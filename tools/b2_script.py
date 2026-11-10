@@ -45,7 +45,7 @@ def main():
     p.add_argument("--no-boot-a", action="store_true")
     p.add_argument("--walk-to", type=int, help="stop the random walk at this frame")
     p.add_argument("--a-every", type=int, default=0, help="press A every N frames after the walk")
-    p.add_argument("--a-from", type=int, default=0, help="first frame of the A presses")
+    p.add_argument("--a-from", type=int, default=0, help="first frame of the A presses (never before the walk ends)")
     a = p.parse_args()
     print(script(a.seed, a.walk_from, a.frames, not a.no_boot_a, a.walk_to, a.a_every, a.a_from))
 
