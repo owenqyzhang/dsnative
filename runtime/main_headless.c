@@ -232,14 +232,70 @@ static u16 parse_keys(const char *s, const char *end) {
     return k;
 }
 
+/* ---- --dump F: the 2D and 3D registers and the polygon list the renderer will draw, as text (stderr) ---- */
+extern u8 *vram_texpal[8];                  /* nds.c: texture palette slots */
+static u32 ld16(const u8 *p) { return p[0] | p[1] << 8; }
+static u32 ld32(const u8 *p) { return p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24; }
+
+static u32 rd_io(const Nds *s, u32 off, int size) {
+    u32 v = 0;
+    for (int i = size - 1; i >= 0; i--) v = v << 8 | s->io[0][off + i];
+    return v;
+}
+
+static void dump_state(const Nds *s, int frame) {
+    const Gpu3d *g = &s->g3d;
+    fprintf(stderr, "dump frame %d\n", frame);
+    fprintf(stderr, "A: DISPCNT %08x BG0-3CNT %04x %04x %04x %04x BLDCNT %04x BLDALPHA %04x BLDY %04x MASTER_BRIGHT %04x DISPCAPCNT %08x\n",
+            rd_io(s, 0, 4), rd_io(s, 8, 2), rd_io(s, 10, 2), rd_io(s, 12, 2), rd_io(s, 14, 2),
+            rd_io(s, 0x50, 2), rd_io(s, 0x52, 2), rd_io(s, 0x54, 2), rd_io(s, 0x6C, 2), rd_io(s, 0x64, 4));
+    fprintf(stderr, "B: DISPCNT %08x BLDCNT %04x BLDALPHA %04x BLDY %04x MASTER_BRIGHT %04x\n",
+            rd_io(s, 0x1000, 4), rd_io(s, 0x1050, 2), rd_io(s, 0x1052, 2), rd_io(s, 0x1054, 2), rd_io(s, 0x106C, 2));
+    fprintf(stderr, "POWCNT1 %04x VRAMCNT", s->powcnt1);
+    for (int b = 0; b < 9; b++) fprintf(stderr, " %c=%02x", 'A' + b, s->vramcnt[b]);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "3D: DISP3DCNT %04x CLEAR_COLOR %08x CLEAR_DEPTH %04x FOG_COLOR %08x FOG_OFFSET %04x ALPHA_REF %02x\n",
+            g->disp3dcnt, ld32(g->regs + 0x50), ld16(g->regs + 0x54), ld32(g->regs + 0x58), ld16(g->regs + 0x5C), g->regs[0x40]);
+    fprintf(stderr, "3D: EDGE_COLOR");
+    for (int k = 0; k < 8; k++) fprintf(stderr, " %04x", ld16(g->regs + 0x30 + 2 * k));
+    fprintf(stderr, "\n3D: TOON_TABLE");
+    for (int k = 0; k < 32; k++) fprintf(stderr, " %04x", ld16(g->regs + 0x80 + 2 * k));
+    fprintf(stderr, "\n3D: FOG_TABLE");
+    for (int k = 0; k < 32; k++) fprintf(stderr, " %02x", g->regs[0x60 + k] & 127);
+    fprintf(stderr, "\n");
+    const G3dList *L = &g->lists[g->cur ^ 1];
+    fprintf(stderr, "3D: list npoly %u nvtx %u swap %x\n", L->npoly, L->nvtx, L->swap);
+    for (u32 k = 0; k < L->npoly; k++) {
+        const G3dPoly *P = &L->poly[k];
+        u32 fmt = (P->tex >> 26) & 7, pbase = P->pltt * (fmt == 2 ? 8 : 16);
+        fprintf(stderr, "poly %u n %u attr %08x alpha %u mode %u id %u tex %08x fmt %u size %ux%u base %05x pltt %04x pbase %05x y %d..%d",
+                k, P->n, P->attr, (P->attr >> 16) & 31, (P->attr >> 4) & 3, (P->attr >> 24) & 63, P->tex, fmt,
+                8u << ((P->tex >> 20) & 7), 8u << ((P->tex >> 23) & 7), (P->tex & 0xFFFF) * 8, P->pltt, pbase, P->ymin, P->ymax);
+        for (int i = 0; i < P->n && i < 3; i++) {
+            const G3dVertex *v = &L->vtx[P->v[i]];
+            fprintf(stderr, " v%d(%d,%d,z%06x,w%d rgb %d,%d,%d st %d,%d)", i, v->x, v->y, v->z, v->w, v->r, v->g, v->b, v->s, v->t);
+        }
+        fprintf(stderr, "\n");
+        if (fmt && pbase) {
+            fprintf(stderr, "  palette");
+            for (int c = 0; c < 8; c++) {
+                const u8 *p = vram_texpal[((pbase + c * 2) >> 14) & 7];
+                u32 a = (pbase + c * 2) & 0x3FFF;
+                fprintf(stderr, " %04x", p ? (u32)p[a] | (u32)p[a + 1] << 8 : 0xFFFF);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: %s game.nds arm9.bin [--frames N] [--png out.png] [--keys F:KEYS,...] [--touch F:X:Y,...] [--stats] [--no-interp | --interp-only]\n"
-                        "       [--hash F,F,...|every:K] [--bench K] [--prof A:B:FILE]\n"
+                        "       [--hash F,F,...|every:K] [--bench K] [--prof A:B:FILE] [--dump F]\n"
                         "       [--<subsystem option> value ...]\n", argv[0]);
         return 2;
     }
-    int frames = 60, stats = 0, no_interp = 0, interp_only = 0, bench = 0, prof_a = -1, prof_b = -1;
+    int frames = 60, stats = 0, no_interp = 0, interp_only = 0, bench = 0, prof_a = -1, prof_b = -1, dump = -1;
     const char *png = 0, *keys = "", *touch = "", *hash = "", *prof_path = 0;
     const char *opts[64]; int nopts = 0;     /* the subsystems' options, as name, value pairs */
     for (int i = 3; i < argc; i++) {
@@ -252,6 +308,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--interp-only")) interp_only = 1;
         else if (!strcmp(argv[i], "--hash") && i + 1 < argc) hash = argv[++i];
         else if (!strcmp(argv[i], "--bench") && i + 1 < argc) bench = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--prof") && i + 1 < argc) {
             char path[1024];
             if (sscanf(argv[++i], "%d:%d:%1023s", &prof_a, &prof_b, path) != 3) { fprintf(stderr, "--prof A:B:FILE\n"); return 2; }
@@ -292,6 +349,7 @@ int main(int argc, char **argv) {
         }
         if (prof_path && f == prof_a) prof_run(1);
         nds_run_frame(s);
+        if (f + 1 == dump) dump_state(s, f + 1);
         if (prof_path && f + 1 == prof_b) prof_run(0);
         double t_frame = now_s(), c_frame = cpu_s();    /* the hashes below are not part of the frame's time */
         if (*hash) {
