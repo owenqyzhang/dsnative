@@ -105,7 +105,9 @@ Headless options: `--keys 100:a,105:` presses A at frame 100 and releases it at 
 `a b x y l r s e` for A, B, X, Y, L, R, Start and Select; `U D W E` for up, down, left and
 right), `--touch F:X:Y`, `--save PATH` keeps the save memory in a file (with `--save-type TYPE`
 when the game isn't in the built-in table of save chips: see the note the runtime prints), and
-`--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run, `--render-threads N` sets the
+`--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run, `--dump F` prints the 2D and 3D
+registers, the VRAM bank setup and the 3D polygon list after frame F (to compare a good frame of a
+game with a bad one), `--render-threads N` sets the
 3D rasterizer's threads (1: none; the frame is the same for any N), and `--hash F,F,...` prints
 hashes of the screens, memory, CPU state and audio at those frames, to check that a change leaves
 the emulation as it was. `python3 tools/bench.py --rom game.nds --save game.sav --press a:100
