@@ -481,8 +481,8 @@ What a Nitro SDK game needs that homebrew doesn't, roughly in the order a game h
 - **Sound**: done (see above): the 16 channels, capture, and mixing to 32768 Hz into a ring for
   the app (`nds_audio_take`), plus the ARM7 BIOS sound calls. The Apple app's AVAudioEngine only
   has to drain the ring.
-- **3D**: done (see above) except exact anti-aliasing and texture filtering, and a faster or
-  Metal rasterizer (the rasterizer is software and single-threaded).
+- **3D**: done (see above) except exact anti-aliasing and texture filtering, and a Metal
+  rasterizer (the rasterizer is software; it draws screen bands on worker threads, see 4. Speed).
 - **The rest of the 2D engines and display capture**: done (see above). With them Pokémon Black
   2's title scene reaches the screen, textured, and its main menu shows the saved game.
 - **Wi-Fi**: done as a stub (see above): the SDK initializes and reports no network.
@@ -514,7 +514,7 @@ words before it. HeartGold's overlay 123 holds trampolines that call a routine a
 through ip, so its code is decrypted lazily. Discovery cannot see this code, because it exists
 only after the game has run: the compiled bytes are ciphertext, the dispatcher's check bytes
 mismatch and the code runs in the interpreter (or, without it, stops with "no recompiled code
-at X"). The stops were Black 0x021882a0 (overlay 230, frame 7363), White 0x021882c0, White 2
+at X"). With the interpreter fallback in, Black and HeartGold run 9000 frames without a stop (about 380,000 and 1,100,000 instructions interpreted) and reach the player's bedroom in a new game; White, White 2 and SoulSilver were not run again. The stops before it were Black 0x021882a0 (overlay 230, frame 7363), White 0x021882c0, White 2
 0x02180ac4 (overlay 337, frame about 7880), Black 2 0x0217c940 (overlay 338, frame about 930 to
 1010) and HeartGold/SoulSilver 0x0225f4a8 (overlay 123, frame about 7937). A build-time pass
 that applies Black's decryptor to the overlay images would also work, but each game family
@@ -523,8 +523,10 @@ route.
 
 ### 3. An Apple app
 
-Built and running for macOS, iOS/iPadOS and tvOS on the homebrew test ROM (no commercial game
-built into it yet, nothing run on a physical device). It is a Swift package, `app/`: DSNKit holds
+Built and running for macOS, iOS/iPadOS and tvOS on the homebrew test ROM. A Pokémon Black 2 Mac
+app also builds (`tools/build_app.py`: about 100 s, 515 s of CPU, on an M6; 241 MB of generated
+C, a 136 MB `libdsn.a`, a 120 MB executable, and the 512 MB ROM in the bundle); the iOS and tvOS
+builds of Black 2 are untried and nothing has run on a physical device. It is a Swift package, `app/`: DSNKit holds
 everything shared, DSNCore is a thin C shim, and DSNative is the Mac app; the iPhone/iPad and Apple
 TV hosts come from an Xcode project that XcodeGen generates from `app/project.yml`. DSNCore hides
 `Nds` from Swift, because its large fixed arrays import as huge tuples. It boots a game as

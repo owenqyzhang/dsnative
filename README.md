@@ -13,9 +13,9 @@ This is a proof of concept. It runs homebrew from start to finish. A commercial 
 Black 2) now runs through boot on both CPUs, plays its intro movie with sound, shows its textured 3D
 title scene and its main menu with the saved game, loads the save into the overworld, opens the
 menus, saves the game (the new save loads again) and plays a wild battle: see [Status](#status) and [the roadmap](docs/design.md#roadmap). The other Pokémon
-games (Black, White, White 2, HeartGold, SoulSilver) get as far as their title scenes or first
-screens and the beginning of a new game before they reach code they decrypt in RAM, which the
-interpreter fallback runs.
+games (Black, White, White 2, HeartGold, SoulSilver) boot and play the start of a new game; the
+code they decrypt in RAM runs in the interpreter fallback (Black and HeartGold were run to the
+player's bedroom).
 
 Nothing from any game is in this repository. You bring your own dumps.
 
@@ -40,7 +40,7 @@ advantages of native execution:
 | Overlays sharing an address | handled: each candidate is checked against memory at run time |
 | Runtime: dispatcher, CPU modes and banked registers, interrupts, BIOS (high-level: every documented NDS call except GetBootProcs and the DSi-only ones, callback decompression included), CP15, TCM | done |
 | Interpreter fallback (`runtime/interp.c`) for code the recompiler cannot have compiled: code modified at run time, stored encrypted, or missed by discovery; no generated code, so it is allowed on iOS and tvOS | done |
-| DS hardware: memory map, VRAM banks, DMA, timers, IPC sync and FIFOs, divider, square root, cartridge reads, SPI (power, firmware, touch), keypad | done for what homebrew uses |
+| DS hardware: memory map, VRAM banks, DMA, timers, IPC sync and FIFOs, divider, square root, cartridge reads, SPI (power, firmware, touch), keypad | done for what homebrew and Pokémon Black 2 use |
 | 2D engines: text, affine, extended affine and bitmap backgrounds (including the large bitmap and extended palettes), regular, affine and bitmap sprites, windows, mosaic, blending, master brightness, VRAM and main memory display, internal affine reference points, the 3D layer as BG0; display capture | done |
 | Firmware flash (ARM7 SPI): header, Wi-Fi settings, never-configured access point slots (the SDK's start-up check passes), user settings, the chip's full instruction set | done |
 | Wi-Fi (ARM7) | a stub: the SDK's initialization runs (ports, baseband and RF chips, Wi-Fi RAM) and reports no network; nothing is received or sent |
@@ -49,9 +49,9 @@ advantages of native execution:
 | Save memory: EEPROM, FLASH and FRAM on the cartridge SPI bus, save file on disk; the chip comes from `--save-type`, a game-code table, a save file's size, else FLASH 512 KB with a note on stderr | done |
 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, mixer at 32768 Hz into a ring for the app, ARM7 BIOS sound calls | done; Pokémon Black 2's sound driver runs |
 | 3D engine: geometry engine (command FIFO and ports, GXSTAT, matrix stacks, lighting, clipping, box/position/vector tests, geometry FIFO DMA) and a software rasterizer (Z or W buffer, Gouraud, all seven texture formats, modulation/decal/toon/highlight/shadow polygons, alpha blending, fog, edge marking, an approximate anti-aliasing) feeding engine A's BG0 | done (no texture filtering, no exact anti-aliasing; the rasterizer is software) |
-| Other games | Pokémon Black, White, White 2, HeartGold and SoulSilver recompile, build and run headless: titles, a new game's first dialogue and name entry (HeartGold and SoulSilver need a touch on the first screens). Each reaches overlay code that is decrypted at run time, which the interpreter fallback runs | boot and the first minutes |
+| Other games | Pokémon Black, White, White 2, HeartGold and SoulSilver recompile, build and run headless: titles, a new game's first dialogue and name entry (HeartGold and SoulSilver need a touch on the first screens). With the interpreter fallback running the code they decrypt in RAM, Black and HeartGold run 9000 frames without stopping and reach the player's bedroom in a new game (White, White 2 and SoulSilver were not run again since the fallback). SDK 4 (HeartGold and SoulSilver) ARM7 images are read | boot and the first minutes of a new game |
 | Speed | `tools/bench.py` measures frames per second and where the time goes (sampling profiler, dispatcher counters, a CPU benchmark in the test ROM, hashes of screens, memory, registers and audio that must not change); the 2D renderer, the 3D rasterizer (screen bands on worker threads) and the dispatcher are tuned: Pokémon Black 2 runs its intro, 3D title scene and main menu at 14-15x real time on an Apple M6 (9-11x on one render thread), the rest of the boot at 36-50x | done for what Black 2 reaches; the generated code is unchanged (a fully busy ARM9 is already 29x real time or better) |
-| Apple app shell: Swift package with Metal screens, controllers, touch and pad, audio, saves; macOS, iOS/iPadOS and tvOS apps build from a ROM with `tools/build_app.py` and run in the simulators | done for the homebrew test ROM (no commercial game built into it yet; nothing run on a physical device) |
+| Apple app shell: Swift package with Metal screens, controllers, touch and pad, audio, saves; macOS, iOS/iPadOS and tvOS apps build from a ROM with `tools/build_app.py` and run in the simulators | done for the homebrew test ROM; a Pokémon Black 2 Mac app builds (about 100 s on an M6; the iOS and tvOS builds of Black 2 are untried); nothing run on a physical device |
 
 ## Try it
 
@@ -93,8 +93,9 @@ python3 -m recomp game.nds -o build/game --build
 cd build/game && ./dsn_headless ../../game.nds arm9.bin --frames 600 --png out.png --stats
 ```
 
-`ndsinfo` works on any DS ROM today. The recompiler and build run, and a commercial game runs
-until the first hardware the runtime doesn't handle yet. Code discovery missed, or that the game
+`ndsinfo` works on any DS ROM today. The recompiler and build run, and the Pokémon games boot
+(see [Status](#status)); a game that needs hardware the runtime doesn't handle yet stops with a
+message. Code discovery missed, or that the game
 rewrites at run time, runs in the interpreter fallback, and the runtime appends each such address to
 `missing.txt`; pass that file back with `--extra missing.txt` for the next build (it does not help
 for code the game stores encrypted: the ROM still holds the ciphertext). `--no-interp` stops at such

@@ -35,6 +35,11 @@
 - Where DS hardware behaves differently from Unicorn (unaligned accesses force alignment on the
   ARM9, STR of the PC stores PC+12), follow GBATEK and keep the difference out of the random
   generators, with a comment saying so.
+- Play-testing a commercial game headless: `tools/b2_script.py` and `tools/random_keys.py` make
+  seeded `--keys` scripts (Pokémon Black 2's menus and a random walk), `--touch F:X:Y` drives the
+  bottom screen, `--png` writes the last frame (run again with another `--frames` for others),
+  `--dump F` prints the 2D/3D registers and the polygon list, `--hash` compares two builds. Work on
+  a copy of a save, never the original.
 - Never add game data (ROMs, dumps, extracted assets, screenshots of commercial games) to the
   repository. Tests use the homebrew ROM built from `tests/hw/`.
 - Generated code and builds go to `build/` (ignored).
