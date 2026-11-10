@@ -12,7 +12,10 @@ attached).
 This is a proof of concept. It runs homebrew from start to finish. A commercial game (Pokémon
 Black 2) now runs through boot on both CPUs, plays its intro movie with sound, shows its textured 3D
 title scene and its main menu with the saved game, loads the save into the overworld and opens the
-party screen: see [Status](#status) and [the roadmap](docs/design.md#roadmap).
+party screen: see [Status](#status) and [the roadmap](docs/design.md#roadmap). The other Pokémon
+games (Black, White, White 2, HeartGold, SoulSilver) get as far as their title scenes or first
+screens and the beginning of a new game before they reach code they decrypt in RAM, which the
+interpreter fallback runs.
 
 Nothing from any game is in this repository. You bring your own dumps.
 
@@ -31,7 +34,7 @@ advantages of native execution:
 
 | Part | State |
 |---|---|
-| ROM reader: header, ARM9/ARM7, Nitro SDK module parameters (to SDK 5), BLZ, autoloads on both CPUs, overlays, file system | done |
+| ROM reader: header, ARM9/ARM7, Nitro SDK module parameters (SDK 4 to 5, including the ARM7 parameters without a signature), BLZ, autoloads on both CPUs, overlays, file system | done |
 | Recompiler: ARMv5TE and ARMv4T, ARM and Thumb, to C | done; matches Unicorn's ARM946 on about 45,000 random snippets |
 | Code discovery: calls, branches, jump targets read by a symbolic evaluator (GCC and CodeWarrior switches, ARM and Thumb), interworking veneers, function pointers in literal pools and data, start-up stubs, position-independent stubs found by content | done for the forms seen so far, plus a missing-code feedback loop |
 | Overlays sharing an address | handled: each candidate is checked against memory at run time |
@@ -46,7 +49,7 @@ advantages of native execution:
 | Save memory: EEPROM, FLASH and FRAM on the cartridge SPI bus, save file on disk; the chip comes from `--save-type`, a game-code table, a save file's size, else FLASH 512 KB with a note on stderr | done |
 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, mixer at 32768 Hz into a ring for the app, ARM7 BIOS sound calls | done; Pokémon Black 2's sound driver runs |
 | 3D engine: geometry engine (command FIFO and ports, GXSTAT, matrix stacks, lighting, clipping, box/position/vector tests, geometry FIFO DMA) and a software rasterizer (Z or W buffer, Gouraud, all seven texture formats, modulation/decal/toon/highlight/shadow polygons, alpha blending, fog, edge marking, an approximate anti-aliasing) feeding engine A's BG0 | done (no texture filtering, no exact anti-aliasing; the rasterizer is software) |
-| Wi-Fi | not started |
+| Other games | Pokémon Black, White, White 2, HeartGold and SoulSilver recompile, build and run headless: titles, a new game's first dialogue and name entry (HeartGold and SoulSilver need a touch on the first screens). Each reaches overlay code that is decrypted at run time, which the interpreter fallback runs | boot and the first minutes |
 | Apple app shell: Swift package with Metal screens, controllers, touch and pad, audio, saves; macOS, iOS/iPadOS and tvOS apps build from a ROM with `tools/build_app.py` and run in the simulators | done for the homebrew test ROM (no commercial game built into it yet; nothing run on a physical device) |
 
 ## Try it
@@ -101,7 +104,8 @@ Headless options: `--keys 100:a,105:` presses A at frame 100 and releases it at 
 `a b x y l r s e` for A, B, X, Y, L, R, Start and Select; `U D W E` for up, down, left and
 right), `--touch F:X:Y`, `--save PATH` keeps the save memory in a file (with `--save-type TYPE`
 when the game isn't in the built-in table of save chips: see the note the runtime prints), and
-`--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run.
+`--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run. Pokémon HeartGold and
+SoulSilver need a touch to get past the first notice screens: `--touch 800:128:153,808:-1:0`.
 
 `python3 tools/build_app.py game.nds -o build/app --platform macos` builds a Mac app with your game
 in it; iOS, tvOS and the simulators are in [app/README.md](app/README.md).

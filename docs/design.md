@@ -79,6 +79,17 @@ Segments are the ARM9 and ARM7 static images, each autoload segment at its desti
 DTCM, ARM7 WRAM, other RAM; SDK 5 lists them in four-word entries), each start-up stub at the
 address crt0 copies it to, and each overlay at its load address.
 
+SDK 4's ARM7 (Pokémon HeartGold and SoulSilver) has module parameters without the nitrocode
+signature or the SDK version: six words (autoload list, its end, the autoload data, static bss
+start and end, the compressed end) that crt0 reaches through a literal in its first 0x400 bytes.
+`Rom._find_params_unsigned` tries each word of the image's start that points into the image as
+that address. A candidate is taken when its list is at the end of the image, a whole number of
+12-byte entries, and the entry sizes add up to the distance between the list and the autoload
+data (the check `_parse_autoloads` already uses), which is hard to hit by chance; homebrew and
+an ARM7 without a table give none. HeartGold's ARM7 has three autoloads (0x027E0000,
+0x037F8000 and 0x06000000, the last for code in VRAM C or D that the game maps to the ARM7),
+and discovery went from 4 functions to 661.
+
 Start-up stubs are code crt0 copies to fast memory and calls before the autoloads overwrite
 it: in SDK 5 the two CPUs' handshake, run from ITCM and from ARM7 WRAM (the reader finds the
 `ldr r1, =src; ldr r2, =dst; add r3, r2, #n` copy loop).
@@ -231,7 +242,15 @@ counted as one cycle each for now.
 - **IPC**: IPCSYNC and the two 16-word FIFOs, with their interrupts.
 - **Divider and square root** (ARM9), with the hardware's divide-by-zero results.
 - **Cartridge**: B7 reads, chip ID, interrupts and DMA, including the secure-area
-  redirection below 0x8000.
+  redirection below 0x8000. A transfer is a stream of word-ready requests: while a block is
+  being read, each word the card has ready is one request for the DMA channel of the CPU that
+  owns the slot (EXMEMCNT bit 11) with card timing (ARM9 timing 5, ARM7 timing 2). `card_dma`
+  repeats the request until the block is read or no channel takes a word, so a channel of one
+  word with repeat (the SDK's CARD library sets it up for some reads, Pokémon Black's overlay
+  loads) moves the whole block, a channel of the block's size moves it in one go, and a channel
+  with fewer words leaves the rest for the CPU to read through the port. It runs when the
+  command starts and when a channel is enabled during the transfer; a channel of the other CPU
+  gets no requests.
 - **SPI** (ARM7): the power manager, the firmware flash and the touch screen controller.
 - **Firmware flash** (`runtime/firmware.c`): the 256 KB flash is built when the machine is
   created, not read from a file. It holds the header (console type FFh = DS, chip size, user
@@ -456,6 +475,30 @@ What a Nitro SDK game needs that homebrew doesn't, roughly in the order a game h
 - **Game profiles**: per game (by game code and revision), the extra entry points, known
   data-in-code regions and patches. Like nxnative's `dm/games/<id>/`.
 - **DSi-enhanced titles** run in DS mode (Black 2 is one); DSi mode is out of scope for now.
+
+**Other games.** All six Pokémon dumps (Black, White, Black 2, White 2, HeartGold, SoulSilver)
+recompile, build and boot. They run their start-up, title or notice screens and the first part
+of a new game with a blank save (HeartGold and SoulSilver need a touch on NO INFO NEEDED at
+(128,153) to get past the first screens; A presses only cycle the notices). Their save traffic
+shows the infrared 00h prefix in front of every command, as `save.c` models; Black exercises
+05h, 03h, 06h and 0Ah and the 08h probe answered AAh, HeartGold and SoulSilver only 05h and 03h
+before their stop, so their write path is untested. Each stopped at the same kind of blocker
+before the interpreter fallback: code the game decrypts at run time. An overlay is stored with
+the bodies of its functions scrambled (the literal pools between them intact) and RAM differs
+from the decompressed image in runs of function bodies (0x64 bytes every 0x78 in HeartGold's
+overlay 123). Black's overlay 230 holds the decryptor: a loop over the overlay's words that
+finds branches by their opcode (the top byte: B, BL, BLX), adds a constant to the offset,
+flips the bit that separates B from BL, and XORs every word with a key that depends on the
+words before it. HeartGold's overlay 123 holds trampolines that call a routine and then jump
+through ip, so its code is decrypted lazily. Discovery cannot see this code, because it exists
+only after the game has run: the compiled bytes are ciphertext, the dispatcher's check bytes
+mismatch and the code runs in the interpreter (or, without it, stops with "no recompiled code
+at X"). The stops were Black 0x021882a0 (overlay 230, frame 7363), White 0x021882c0, White 2
+0x02180ac4 (overlay 337, frame about 7880), Black 2 0x0217c940 (overlay 338, frame about 930 to
+1010) and HeartGold/SoulSilver 0x0225f4a8 (overlay 123, frame about 7937). A build-time pass
+that applies Black's decryptor to the overlay images would also work, but each game family
+needs its own; capturing the decrypted bytes from a run into a local profile is the general
+route.
 
 ### 3. An Apple app
 
