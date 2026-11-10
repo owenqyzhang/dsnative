@@ -224,6 +224,19 @@ void nds_gxfifo_dma(Nds *s) {
     }
 }
 
+/* The card has a word ready until the block is read, and each one is a request for the slot
+ * owner's DMA channel in card timing: a channel of one word with repeat (the SDK's CARD
+ * library sets that up for some reads) moves the block a word at a time. Stops when no channel
+ * takes a word, so the CPU can read the rest through the port. */
+static void card_dma(Nds *s) {
+    int cpu = (s->exmemcnt >> 11) & 1, t = cpu == 0 ? 5 : 2;
+    while (s->card_left) {
+        u32 before = s->card_left;
+        dma_trigger(s, cpu, t);
+        if (s->card_left == before) break;
+    }
+}
+
 static void dma_write_cnt(Nds *s, int cpu, int ch, u32 v) {
     Dma *d = &s->dma[cpu][ch];
     u32 old = d->cnt;
@@ -235,7 +248,7 @@ static void dma_write_cnt(Nds *s, int cpu, int ch, u32 v) {
         int t = dma_timing(cpu, v);
         if (cpu == 0 && t == 7) nds_gxfifo_dma(s);
         else if (t == 0) dma_run(s, cpu, ch);
-        else if (((cpu == 0 && t == 5) || (cpu == 1 && t == 2)) && s->card_left) dma_run(s, cpu, ch);
+        else if (((cpu == 0 && t == 5) || (cpu == 1 && t == 2)) && s->card_left && cpu == ((s->exmemcnt >> 11) & 1)) card_dma(s);
     }
 }
 
@@ -344,8 +357,7 @@ static void card_start(Nds *s, u32 ctrl) {
     }
     if (!len) { card_finish(s); return; }
     s->romctrl |= 1u << 23;
-    int cpu = (s->exmemcnt >> 11) & 1;
-    dma_trigger(s, cpu, cpu == 0 ? 5 : 2);
+    card_dma(s);
 }
 
 static u32 card_read(Nds *s) {

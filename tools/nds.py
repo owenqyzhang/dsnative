@@ -248,7 +248,7 @@ class Rom:
         self.arm7 = d[h['arm7_rom']:h['arm7_rom'] + h['arm7_size']]
         self.arm9 = d[h['arm9_rom']:h['arm9_rom'] + h['arm9_size']]
         self._parse_arm9()
-        self.params7 = self._find_params(self.arm7)
+        self.params7 = self._find_params(self.arm7) or self._find_params_unsigned(self.arm7, h['arm7_ram'])
         if self.params7 is not None:
             self.autoloads7 = self._parse_autoloads(7, self.arm7, h['arm7_ram'], self.params7)
         self.stubs = {9: self._find_stubs(9, self.arm9, h['arm9_ram']), 7: self._find_stubs(7, self.arm7, h['arm7_ram'])}
@@ -268,6 +268,26 @@ class Rom:
         o = pos - 0x1C
         w = struct.unpack_from('<7I', img, o)
         return ModuleParams(o, *w)
+
+    @staticmethod
+    def _find_params_unsigned(img, ram):
+        """SDK 4's ARM7 crt0 has the module parameters without the signature or the SDK version:
+        six words (autoload list, its end, the autoload data, static bss start and end, the
+        compressed end) that its start-up code reaches through a literal. The words of the
+        first 0x400 bytes that point into the image are tried as that address; one is a table
+        when its list is at the end of an autoload data whose entries' sizes add up to the
+        distance between them, which is hard to hit by chance."""
+        for o in range(0, min(len(img), 0x400) - 3, 4):
+            q = u32(img, o) - ram
+            if not 0 <= q <= len(img) - 24 or q % 4:
+                continue
+            lst, end, src, bss0, bss1, comp = struct.unpack_from('<6I', img, q)
+            lst, end, src = lst - ram, end - ram, src - ram
+            if not 0 < src <= lst < end == len(img) or (end - lst) % 12 or comp:
+                continue
+            if sum(u32(img, e + 4) for e in range(lst, end, 12)) == lst - src:
+                return ModuleParams(q, ram + lst, ram + end, ram + src, bss0, bss1, comp, 0)
+        return None
 
     def _parse_arm9(self):
         h = self.header
