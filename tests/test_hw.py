@@ -15,6 +15,17 @@ ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, 'build', 'hwtest')
 
 
+def fresh_save():
+    """Both runs start from an erased save chip: each one's savein must match, and the compiled
+    run's shutdown write must not reach the interpreted run. The save file's persistence across
+    runs is test_save.py's job."""
+    for name in ('save.sav', 'save.sav.tmp'):
+        try:
+            os.remove(os.path.join(OUT, name))
+        except FileNotFoundError:
+            pass
+
+
 def main():
     sys.path.insert(0, os.path.join(HERE, 'hw'))
     import build as hwbuild
@@ -32,6 +43,7 @@ def main():
                 extra_args += line[5:].split()
             elif line.strip() and not line.startswith('#'):
                 extra_lines.append(line)
+    fresh_save()
     res = subprocess.run([os.path.join(gen, 'dsn_headless'), rom, os.path.join(gen, 'arm9.bin'), '--frames', '100',
                           '--png', png, '--keys', '35:E,45:ED,55:', '--stats', '--no-interp', *extra_args],
                          cwd=gen, capture_output=True, text=True)
@@ -64,6 +76,7 @@ def main():
         failures.append(f'expected "itcm {h:08x}", got "{got.get("itcm")}"')
     # the same ROM with every instruction interpreted (no compiled code on either CPU) must say the same
     # (the timer test counts cycles, which compiled code charges a block at a time: it just has to pass)
+    fresh_save()
     ires = subprocess.run([os.path.join(gen, 'dsn_headless'), rom, os.path.join(gen, 'arm9.bin'), '--frames', '100',
                            '--png', os.path.join(OUT, 'screen_interp.png'), '--keys', '35:E,45:ED,55:', '--stats',
                            '--interp-only', *extra_args], cwd=gen, capture_output=True, text=True)

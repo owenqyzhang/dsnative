@@ -1,7 +1,8 @@
 # save_9.c / save_7.c: 512 KB FLASH (ST 45PE40, JEDEC ID 20 40 13), the save file in
 # build/hwtest/ (cwd is build/hwtest/out). The page at 7F00h ends as i * 37 + 11 with bytes
 # 10h-1Fh ANDed with 0Fh; its FNV-1a is f89c8675. Status: 00 at start, 02 after WREN, 00 after
-# the erase. "savein" depends on what an earlier run left, so tests/test_save.py checks it.
+# the erase. "savein" depends on what an earlier run left, so tests/test_save.py checks it, and
+# tests/test_hw.py erases the file before each of its runs.
 args: --save-type flash512k --save ../save.sav
 save 00204013 00000200 f89c8675 ok
 save7 f89c8675
