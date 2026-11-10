@@ -119,7 +119,8 @@ in it; iOS, tvOS and the simulators are in [app/README.md](app/README.md).
 
 ## How it works
 
-1. `tools/nds.py` reads the ROM. It decompresses the ARM9 static image and the overlays, and
+1. `tools/nds.py` reads the ROM. It decompresses the ARM9 static image (for the recompiler; the machine
+   boots the stored image and the game's own crt0 decompresses it) and the overlays, and
    finds the autoload segments (ITCM, DTCM) at the addresses the game copies them to.
 2. `recomp/program.py` discovers the code. It walks it from the entry points, following
    calls, branches, jump tables and Thumb/ARM veneers, and takes as candidates any literal-pool

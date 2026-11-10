@@ -80,12 +80,62 @@ def blz_decompress(data):
     return bytes(out)
 
 
-def blz_compress(data, keep=0):
-    """Compress data with BLZ, leaving its first `keep` bytes uncompressed.
+def _blz_in_place(packed):
+    """Decompress `packed` the way a crt0 does, in one buffer, writing backwards from the end
+    of the output while reading backwards from the footer. Returns the result, or None when a
+    write would land on stream bytes not read yet (literals cost a flag bit each, so a stretch
+    that doesn't compress can make the output pointer overtake the input)."""
+    n = len(packed)
+    inc_len = u32(packed, n - 4)
+    hdr = u32(packed, n - 8)
+    stop = n - (hdr & 0xFFFFFF)
+    buf = bytearray(packed) + bytearray(inc_len)
+    src, dst = n - (hdr >> 24), n + inc_len
+    while src > stop:
+        src -= 1
+        flags = buf[src]
+        for _ in range(8):
+            if dst <= stop or src <= stop:
+                break
+            if flags & 0x80:
+                src -= 2
+                v = buf[src] | buf[src + 1] << 8
+                length, disp = (v >> 12) + 3, (v & 0xFFF) + 3
+                for _ in range(length):
+                    if dst <= stop:
+                        break
+                    dst -= 1
+                    if dst < src:
+                        return None
+                    buf[dst] = buf[dst + disp]
+            else:
+                src -= 1
+                dst -= 1
+                if dst < src:
+                    return None
+                buf[dst] = buf[src]
+            flags = (flags << 1) & 0xFF
+    return bytes(buf)
 
-    Only used to build test images (a real game is compressed by the Nitro SDK); the
-    output decompresses with blz_decompress and with the SDK's own routine."""
+
+def blz_compress(data, keep=0):
+    """Compress data with BLZ, leaving its first `keep` bytes (at least) uncompressed.
+
+    Only used to build test images (a real game is compressed by the Nitro SDK). Like the SDK's
+    own tools it makes sure the result decompresses in place, which is how a crt0 does it: when
+    the first stretch of the compressed part doesn't shrink, more of the start stays
+    uncompressed. The output decompresses with blz_decompress and with _blz_in_place."""
     data = bytes(data)
+    for k in range(keep, len(data), 4):
+        packed = _blz_encode(data, k)
+        if packed is None:
+            return None
+        if _blz_in_place(packed) == data:
+            return packed
+    return None
+
+
+def _blz_encode(data, keep):
     rev = data[keep:][::-1]
     stream = bytearray()
     i = 0
@@ -194,6 +244,7 @@ class Rom:
     arm9: bytes = b''           # decompressed
     arm7: bytes = b''
     arm9_compressed: bool = False
+    arm9_stored: bytes = b''       # the ARM9 image as the cartridge holds it (BLZ-compressed or not)
     params: ModuleParams = None
     autoloads: list = field(default_factory=list)   # list of Segment (ARM9)
     params7: ModuleParams = None
@@ -293,6 +344,7 @@ class Rom:
         h = self.header
         ram = h['arm9_ram']
         img = self.arm9
+        self.arm9_stored = img
         p = self._find_params(img)
         self.params = p
         if p is None:
@@ -303,8 +355,12 @@ class Rom:
                 raise RomError(f'compressed static end {p.compressed_end:#x} lies outside the ARM9 image')
             img = blz_decompress(img[:end]) + img[end:]
             self.arm9_compressed = True
-            # The decompressed image no longer needs decompressing: clear the field, as
-            # the SDK's own routine does once it has run.
+            # The decompressed image no longer needs decompressing: clear the field so that
+            # discovery sees the program as it is after crt0 ran. The SDK's crt0 does not clear
+            # it: the field stays set in RAM (the module parameters are in the uncompressed
+            # head, which a game's reload from the cartridge leaves alone), so a restart that
+            # reloads the compressed body decompresses it again. `arm9_stored` keeps the image
+            # as the cartridge has it, for the runtime to boot from.
             b = bytearray(img)
             struct.pack_into('<I', b, p.offset + 0x14, 0)
             img = bytes(b)

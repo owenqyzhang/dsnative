@@ -8,7 +8,7 @@ assemble the .app bundle.
                                [--run [--device NAME] [--screenshot PNG]]
 
 Writes OUTDIR/<name>.app (macOS) or OUTDIR/<name>-<platform>.app, with the ROM and the
-decompressed ARM9 image the recompiler writes (arm9.bin) in its resources. The generated C is
+ARM9 image as the cartridge stores it that the recompiler writes (arm9.bin) in its resources. The generated C is
 in OUTDIR/game, each platform's objects and libdsn.a in OUTDIR/game-<platform>, SwiftPM's build
 in OUTDIR/swiftpm (macOS) or Xcode's in OUTDIR/xcode-build-<platform>, with the project
 XcodeGen made from app/project.yml in OUTDIR/xcode. The bundle holds your ROM: build it

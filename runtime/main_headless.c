@@ -5,7 +5,8 @@
  *                [--touch F:X:Y,...] [--stats] [--no-interp | --interp-only]
  *                [--hash F,F,...|every:K] [--bench K] [--prof A:B:FILE]
  *
- * arm9.bin is the decompressed ARM9 image the recompiler wrote. --keys holds the buttons
+ * arm9.bin is the ARM9 image the recompiler wrote, as the cartridge stores it (the game's own crt0
+ * decompresses it). --keys holds the buttons
  * pressed from frame F on (letters a b l r x y s=start e=select and the arrows u d L R as
  * U D W E; an empty set releases them). Code with no compiled entry (modified at run time, or
  * missed by discovery) runs in the interpreter and is logged once to missing.txt; --no-interp

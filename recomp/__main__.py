@@ -1,6 +1,6 @@
 """Recompile a DS game: python3 -m recomp <game.nds> -o <build dir> [--extra missing.txt] [--build]
 
-Writes the C for both CPUs (gen/g9_*.c, gen/g7_*.c), the decompressed ARM9 image (arm9.bin)
+Writes the C for both CPUs (gen/g9_*.c, gen/g7_*.c), the ARM9 image as the cartridge stores it (arm9.bin)
 and a Makefile that links them with the runtime into dsn_headless. --extra adds entry points
 the runtime reported as missing (its missing.txt), for the next build.
 """
@@ -88,8 +88,10 @@ def main():
         print(f'ARM{cpu}: {st["functions"]} functions, {st["instructions"]} instructions, {len(prog.warnings)} warnings')
         for w in prog.warnings[:10]:
             print(f'    {w}')
+    # The machine boots from the stored image and the game's own crt0 decompresses it, as on a
+    # console; the C above is built from the decompressed image, which the crt0 produces in place.
     with open(os.path.join(args.out, 'arm9.bin'), 'wb') as f:
-        f.write(rom.arm9)
+        f.write(rom.arm9_stored)
     with open(os.path.join(args.out, 'Makefile'), 'w') as f:
         f.write(MAKEFILE.format(rt=os.path.join(ROOT, 'runtime')))
     if args.build:

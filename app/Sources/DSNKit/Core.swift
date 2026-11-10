@@ -18,7 +18,7 @@ public final class Core: @unchecked Sendable {
 
     let handle: OpaquePointer
 
-    /// Loads the ROM and the decompressed ARM9 image (arm9.bin) the recompiler wrote.
+    /// Loads the ROM and the ARM9 image (arm9.bin, as the cartridge stores it) the recompiler wrote.
     public init(rom: URL, arm9: URL) throws {
         var err = [CChar](repeating: 0, count: 512)
         guard let h = dsn_core_create(rom.path, arm9.path, &err, Int32(err.count)) else {

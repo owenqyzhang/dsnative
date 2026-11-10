@@ -33,6 +33,12 @@ def main():
     gen = os.path.join(OUT, 'out')
     subprocess.run([sys.executable, '-m', 'recomp', rom, '-o', gen, '--build'], cwd=ROOT, check=True,
                    stdout=subprocess.DEVNULL)
+    # the machine boots the ARM9 image as the cartridge stores it (BLZ-compressed here): the test
+    # program's own crt0 decompresses it, as a game's does, and a reload from the cartridge restarts it
+    sys.path.insert(0, os.path.join(ROOT, 'tools'))
+    from nds import Rom
+    stored = Rom.load(rom).arm9_stored
+    assert open(os.path.join(gen, 'arm9.bin'), 'rb').read() == stored, 'arm9.bin is not the cartridge\'s ARM9 image'
     png = os.path.join(OUT, 'screen.png')
     # Each subsystem's tests/hw/expect_<name>.txt: "args: ..." lines add headless options, the
     # other lines (not starting with #) are debug lines expected verbatim, keyed by first word.

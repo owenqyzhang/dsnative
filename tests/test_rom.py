@@ -10,6 +10,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
+import nds                                                      # noqa: E402
 from nds import build_rom, Rom, NITROCODE_BE, NITROCODE_LE     # noqa: E402
 
 ARM7 = 0x02380000
@@ -152,12 +153,33 @@ def check_no_pic_stub():
         assert not got, f'{what}: found {[s.data.hex() for s in got]}'
 
 
+def check_blz_in_place():
+    """A crt0 decompresses in place, writing backwards from the end of the output while it reads
+    backwards from the footer. A literal costs a flag bit, so when the first stretch of the
+    compressed part doesn't shrink, the output pointer can overtake input not read yet: the
+    compressor then has to leave more of the start uncompressed."""
+    import random
+    rng = random.Random(7)
+    data = bytes(rng.randrange(256) for _ in range(0x40)) + bytes(rng.randrange(256) for _ in range(300)) + \
+        b'the quick brown fox jumps over the lazy dog. ' * 120
+    keep = 0x40
+    naive = nds._blz_encode(data, keep)
+    assert nds.blz_decompress(naive) == data, 'the encoder round trip'
+    assert nds._blz_in_place(naive) != data, 'the data should be one where the plain encoding is unsafe in place'
+    packed = nds.blz_compress(data, keep)
+    assert packed is not None and len(packed) < len(data)
+    assert packed[:keep] == data[:keep], 'the head is kept'
+    assert nds.blz_decompress(packed) == data, 'the round trip'
+    assert nds._blz_in_place(packed) == data, 'decompression in place'
+    assert nds.blz_compress(bytes(rng.randrange(256) for _ in range(2000)), keep) is None, 'nothing to gain'
+
+
 def main():
     failed = 0
     for name, fn in [('ARM7 autoloads, 3-word entries', lambda: check(3)), ('ARM7 autoloads, 4-word entries', lambda: check(4)),
                      ('ARM7 parameters without a signature', check_unsigned), ('no parameters without a signature', check_no_unsigned),
                      ('start-up stub', check_stub), ('stack stub', check_pic_stub),
-                     ('no stack stub', check_no_pic_stub)]:
+                     ('no stack stub', check_no_pic_stub), ('BLZ compression decompresses in place', check_blz_in_place)]:
         try:
             fn()
             print(f'ok    {name}')

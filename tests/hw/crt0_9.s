@@ -7,11 +7,11 @@
 _start:
     mov     r0, #0x04000000
     str     r0, [r0, #0x208]            @ IME = 0
-    @ decompression would run here; the loader hands over the decompressed image
+    @ decompress the static module in place, as the SDK's crt0 does; the field stays set, so a
+    @ restart that reloads the compressed body runs this again
     ldr     r1, =_start_ModuleParams
     ldr     r0, [r1, #0x14]
-    cmp     r0, #0
-    bne     .                           @ still compressed: not expected
+    bl      blz_uncompress
     @ CP15: DTCM at 0x027C0000 (16 KB), ITCM over 32 MB, both on
     ldr     r0, =0x027C000A
     mcr     p15, 0, r0, c9, c1, 0
@@ -63,6 +63,63 @@ _start:
     .pool
 
     .balign 4
+@ BLZ (backward LZ) decompression in place. r0 = end of the compressed data (0: nothing to do).
+@ The last 8 bytes: the footer's length (top byte) and the compressed part's length (low 24 bits),
+@ then how much the data grows. The stream is read backwards from the footer and written
+@ backwards from the end of the output; a flag byte covers 8 items, high bit first: 1 = a
+@ halfword (length - 3 in the top 4 bits, distance - 3 in the low 12) copying forward from
+@ already written output, 0 = one literal byte.
+    .arm
+blz_uncompress:
+    cmp     r0, #0
+    bxeq    lr
+    ldr     r1, [r0, #-4]               @ growth
+    cmp     r1, #0
+    bxeq    lr
+    ldr     r2, [r0, #-8]
+    mov     r3, r2, lsr #24             @ footer length
+    bic     r2, r2, #0xFF000000         @ compressed length
+    sub     r3, r0, r3                  @ src: end of the stream
+    sub     r2, r0, r2                  @ stop: start of the compressed part
+    add     r1, r0, r1                  @ dst: end of the output
+.Lblz_flags:
+    cmp     r3, r2
+    bxls    lr
+    ldrb    r12, [r3, #-1]!
+    mov     r4, #8
+.Lblz_item:
+    cmp     r1, r2
+    bxls    lr
+    cmp     r3, r2
+    bxls    lr
+    tst     r12, #0x80
+    beq     .Lblz_literal
+    ldrb    r5, [r3, #-1]!              @ two byte loads: the stream is not halfword aligned
+    ldrb    r6, [r3, #-1]!
+    orr     r6, r6, r5, lsl #8
+    mov     r5, r6, lsr #12
+    add     r5, r5, #3                  @ length
+    bic     r6, r6, #0xF000
+    add     r6, r6, #3                  @ distance
+.Lblz_copy:
+    cmp     r1, r2
+    bls     .Lblz_next
+    sub     r1, r1, #1
+    ldrb    r7, [r1, r6]
+    strb    r7, [r1]
+    subs    r5, r5, #1
+    bne     .Lblz_copy
+    b       .Lblz_next
+.Lblz_literal:
+    ldrb    r7, [r3, #-1]!
+    strb    r7, [r1, #-1]!
+.Lblz_next:
+    mov     r12, r12, lsl #1
+    subs    r4, r4, #1
+    bne     .Lblz_item
+    b       .Lblz_flags
+    .ltorg
+
     .global _start_ModuleParams
 _start_ModuleParams:
     .word   __autoload_list, __autoload_list_end, __autoload_start

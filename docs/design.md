@@ -313,7 +313,21 @@ counted as one cycle each for now.
   dispatch entered). Making it work would mean tracking the guest PC at I/O writes in generated
   code, which touches the recompiler and is left as future work.
 - **Direct boot**: the binaries in RAM, the header and chip IDs where the firmware puts them,
-  the firmware user settings, registers and stacks.
+  the firmware user settings, registers and stacks. The ARM9 binary is loaded as the cartridge
+  stores it (`arm9.bin`, BLZ-compressed for most games), not decompressed on the host: the
+  game's own crt0 decompresses it in place, from the `compressed_end` word of its module
+  parameters, which it leaves set. The recompiler works from the decompressed image (the code
+  is what crt0 produces; `Rom.arm9` has the word cleared, `Rom.arm9_stored` is the image as
+  stored). This is what lets a game restart itself: Pokémon Black 2 reloads its compressed
+  program over its own RAM from the cartridge (the ITCM card routine, then a jump to the entry
+  at the header's ARM9 address; the module parameters in the uncompressed head stay) after
+  quitting the Mystery Gift menu, and its crt0 decompresses it again. When the runtime booted
+  a pre-decompressed image with the word cleared, that restart ran crt0 over compressed bytes
+  and the ARM9 spun on a destroyed literal pool with a white screen. A crt0 decompresses in
+  place, so a compressed image must be safe to decode that way (`blz_compress`, used to build
+  test images, makes sure of it and tests/test_rom.py checks it); a decompression routine
+  reads the stream's halfwords a byte at a time, since the pointer isn't halfword aligned and
+  the ARM9 forces the address even.
 - **Sound** (`runtime/sound.c`, ARM7): the 16 channels (PCM8, PCM16, IMA-ADPCM; PSG squares on
   8-13, noise on 14-15), the two capture units and the mixer, as GBATEK "DS Sound" describes
   them. The sound runs lazily, to the machine's time (`Nds.time`, ARM7 bus cycles) at the end of

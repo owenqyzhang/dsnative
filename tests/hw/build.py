@@ -57,6 +57,7 @@ def main():
     open(path, 'wb').write(rom)
     r = Rom.load(path)
     assert r.arm9_compressed and r.arm9[:len(arm9)] == arm9[:params + 0x14] + b'\0\0\0\0' + arm9[params + 0x18:len(arm9)], 'BLZ round trip'
+    assert r.arm9_stored == bytes(b), 'the stored image is what the cartridge holds'
     print(f'{path}: ARM9 {len(arm9)} bytes ({len(packed)} compressed), ARM7 {len(arm7)} bytes, autoloads {[hex(s.addr) for s in r.autoloads]}')
     host = os.path.join(out, 'host_suite')
     run(['cc', '-O2', '-o', host, src('host.c'), src('suite.c')])

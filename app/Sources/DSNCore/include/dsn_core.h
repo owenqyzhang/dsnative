@@ -35,7 +35,7 @@
 
 typedef struct DsnCore DsnCore;
 
-/* Loads the ROM and the decompressed ARM9 image the recompiler wrote (arm9.bin). Returns NULL
+/* Loads the ROM and the ARM9 image the recompiler wrote (arm9.bin: as the cartridge stores it, the game decompresses it). Returns NULL
  * with a message in err when a file can't be read. */
 DsnCore *dsn_core_create(const char *rom_path, const char *arm9_path, char *err, int err_len);
 /* A runtime option ("--save", path), before dsn_core_boot: 0 when no subsystem knows it. */
