@@ -20,6 +20,7 @@
  * set and test a stencil bit instead of (or as well as) drawing. */
 #include <stdlib.h>
 #include "nds.h"
+#include "workers.h"
 
 extern u8 *vram_texslot[4], *vram_texpal[8];    /* nds.c: the VRAM banks mapped as texture image and palette */
 
@@ -244,6 +245,7 @@ static void span(const Poly *P, int y, const Cross *l, const Cross *r, int edge_
     }
     s64 den = r->x - l->x;
     if (den <= 0) den = 1;
+    s64 dz = (s64)r->z - l->z;
     int x0 = start < 0 ? 0 : start, x1 = end > 256 ? 256 : end;
     for (int x = x0; x < x1; x++) {
         int on_edge = edge_row || x == start || x == end - 1 || (x >= llo && x < lhi) || (x >= rlo && x < rhi);
@@ -251,10 +253,18 @@ static void span(const Poly *P, int y, const Cross *l, const Cross *r, int edge_
         s64 num = ((s64)x << 16) + 0x8000 - l->x;
         num = num < 0 ? 0 : num > den ? den : num;
         s64 pd = (den - num) * r->wn + num * l->wn;
-        s64 p = pd ? ((num * l->wn) << 16) / pd : 0;
+        s64 p = 0;
         u32 depth;
-        if (P->wbuf) { s64 w = l->w + (((r->w - l->w) * p) >> 16); depth = (u32)(w < 0 ? 0 : w > 0xFFFFFF ? 0xFFFFFF : w); }
-        else depth = (u32)(l->z + (s32)(((s64)r->z - l->z) * num / den));
+        if (P->wbuf) {
+            p = pd ? ((num * l->wn) << 16) / pd : 0;
+            s64 w = l->w + (((r->w - l->w) * p) >> 16); depth = (u32)(w < 0 ? 0 : w > 0xFFFFFF ? 0xFFFFFF : w);
+        } else {
+            depth = (u32)(l->z + (dz ? (s32)(dz * num / den) : 0));
+        }
+        /* a pixel behind what is drawn costs nothing more: the perspective factor and the attributes are
+         * worked out only for the pixels that pass (fragment tests again, with the same answer) */
+        if (!depth_pass(P, depth, P->g->depth[(u32)y * 256 + (u32)x])) continue;
+        if (!P->wbuf) p = pd ? ((num * l->wn) << 16) / pd : 0;
         /* anti-aliasing: the side pixels of a polygon's row are partly covered, by how far the
          * edge's crossing is from the pixel's outer side (the crossing at a row's centre only:
          * no coverage along the top and bottom edges) */
@@ -308,7 +318,8 @@ static void at_vertex(const G3dVertex *v, s32 wn, Cross *c) {
     c->s = v->s * 256; c->t = v->t * 256;
 }
 
-static void draw_polygon(const Poly *P, const G3dList *L, const G3dPoly *poly) {
+/* rows ylo..yhi-1 only: the screen bands are drawn independently (gpu3d_render) */
+static void draw_polygon(const Poly *P, const G3dList *L, const G3dPoly *poly, int ylo, int yhi) {
     const G3dVertex *v[G3D_POLY_VERTS];
     s32 wn[G3D_POLY_VERTS], wmax = 1;
     int n = poly->n, xmin = 1 << 20, xmax = -(1 << 20), ymin = xmin, ymax = xmax;
@@ -331,7 +342,7 @@ static void draw_polygon(const Poly *P, const G3dList *L, const G3dPoly *poly) {
     while ((wmax >> sh) > 0xFFFF) sh++;
     for (int i = 0; i < n; i++) { wn[i] = v[i]->w >> sh; if (wn[i] < 1) wn[i] = 1; }
     if (ymin == ymax) {                 /* flat: one row, at least one pixel */
-        if (ymin < 0 || ymin >= 192) return;
+        if (ymin < ylo || ymin >= yhi) return;
         int lo = 0, hi = 0;
         for (int i = 1; i < n; i++) { if (v[i]->x < v[lo]->x) lo = i; if (v[i]->x > v[hi]->x) hi = i; }
         Cross l, r;
@@ -339,7 +350,7 @@ static void draw_polygon(const Poly *P, const G3dList *L, const G3dPoly *poly) {
         span(P, ymin, &l, &r, 1, thin);
         return;
     }
-    int y0 = ymin < 0 ? 0 : ymin, y1 = ymax > 192 ? 192 : ymax;
+    int y0 = ymin < ylo ? ylo : ymin, y1 = ymax > yhi ? yhi : ymax;
     for (int y = y0; y < y1; y++) {
         Cross l, r, c;
         int k = 0;
@@ -364,12 +375,12 @@ static void draw_polygon(const Poly *P, const G3dList *L, const G3dPoly *poly) {
  * in texture slot 2 and a depth bitmap in slot 3, 256x256 and scrolled by CLRIMAGE_OFFSET with
  * wrap-around; the clear polygon ID stays in CLEAR_COLOR. The Y offset is taken as 8 bits
  * (GBATEK says bits 8-14: a guess that costs nothing for offsets below 128). */
-static void rear_plane(Gpu3d *g) {
+static void rear_plane(Gpu3d *g, u32 y0, u32 y1) {
     u32 cc = rd32r(g->regs + 0x50);
     u32 id = (cc >> 24) & 63;
     if (g->disp3dcnt & 0x4000) {
         u32 off = rd16r(g->regs + 0x56), xo = off & 255, yo = (off >> 8) & 255;
-        for (u32 y = 0; y < 192; y++)
+        for (u32 y = y0; y < y1; y++)
             for (u32 x = 0; x < 256; x++) {
                 u32 a = (((y + yo) & 255) * 256 + ((x + xo) & 255)) * 2;
                 u32 c = tex16(0x40000 + a), d = tex16(0x60000 + a);
@@ -382,7 +393,7 @@ static void rear_plane(Gpu3d *g) {
     }
     u32 c = rgb6((u16)cc) | ((cc >> 16) & 31) << 18, d = depth24(rd16r(g->regs + 0x54));
     u32 pa = id | ((cc & 0x8000) ? A_FOG : 0);
-    for (u32 i = 0; i < 192 * 256; i++) { g->color[i] = c; g->depth[i] = d; g->pattr[i] = pa; }
+    for (u32 i = y0 * 256; i < y1 * 256; i++) { g->color[i] = c; g->depth[i] = d; g->pattr[i] = pa; }
 }
 
 /* Edge marking, once the polygons are in: a pixel flagged as part of an opaque polygon's outline
@@ -510,12 +521,45 @@ static int late_pass(const G3dPoly *P, u32 disp) {
     return mode != 1 && !(mode == 3 && !((P->attr >> 24) & 63));      /* decal: A = Av; a mask draws no colour */
 }
 
+/* What a band job needs: the polygons in drawing order (the first nop are the opaque ones, in the order
+ * sent; the rest are keyed, the polygon in the low 20 bits). */
+typedef struct {
+    Gpu3d *g;
+    const G3dList *L;
+    const u32 *toon;
+    const u64 *order;
+    u32 nop;
+    int wbuf;
+} Frame;
+
+/* Rows ylo..yhi-1: the rear plane, then every polygon in order, clipped to the rows. A pixel depends
+ * only on the polygons that cover it, in the same order whatever the rows around it, so any split of the
+ * screen into bands gives the same frame. */
+static void draw_rows(const Frame *F, int ylo, int yhi) {
+    Gpu3d *g = F->g;
+    const G3dList *L = F->L;
+    rear_plane(g, (u32)ylo, (u32)yhi);
+    for (u32 k = 0; k < L->npoly; k++) {
+        const G3dPoly *P = &L->poly[k < F->nop ? F->order[k] : F->order[k] & 0xFFFFF];
+        if (P->ymax < ylo || P->ymin >= yhi) continue;      /* no row of the band (a flat polygon on its first row is ymin == ymax) */
+        Poly c;
+        memset(&c, 0, sizeof c);
+        c.g = g; c.toon = F->toon; c.disp = g->disp3dcnt;
+        setup(&c, P, F->wbuf);
+        draw_polygon(&c, L, P, ylo, yhi);
+    }
+}
+
+#define BAND_ROWS 16            /* 12 bands: more than threads, so a busy band does not hold the others up */
+#define PARALLEL_POLYS 48       /* fewer polygons than this are drawn in the caller: waking threads would cost more */
+
+static void draw_band(void *arg, int band) { draw_rows(arg, band * BAND_ROWS, (band + 1) * BAND_ROWS); }
+
 void gpu3d_render(Nds *s) {
     Gpu3d *g = &s->g3d;
     G3dList *L = &g->lists[g->cur ^ 1];
     u32 toon[32];
     for (int i = 0; i < 32; i++) toon[i] = rgb6(rd16r(g->regs + 0x80 + 2 * i));
-    rear_plane(g);
     /* opaque polygons first, in the order they were sent; then the translucent ones, by bottom
      * then top Y (ties in order sent) unless the swap asked for manual order. GBATEK gives no
      * rule for the sort, this is a guess. */
@@ -533,14 +577,9 @@ void gpu3d_render(Nds *s) {
         order[nop + nt++] = (L->swap & 1) ? i : key;
     }
     if (!(L->swap & 1)) qsort(order + nop, nt, sizeof *order, cmp_u64);
-    for (u32 k = 0; k < L->npoly; k++) {
-        const G3dPoly *P = &L->poly[k < nop ? order[k] : order[k] & 0xFFFFF];
-        Poly c;
-        memset(&c, 0, sizeof c);
-        c.g = g; c.toon = toon; c.disp = g->disp3dcnt;
-        setup(&c, P, (L->swap >> 1) & 1);
-        draw_polygon(&c, L, P);
-    }
+    Frame F = {g, L, toon, order, nop, (L->swap >> 1) & 1};
+    if (L->npoly >= PARALLEL_POLYS) workers_run(192 / BAND_ROWS, draw_band, &F);
+    else draw_rows(&F, 0, 192);
     if (g->disp3dcnt & 0x20) edge_marking(g, (g->disp3dcnt >> 4) & 1);
     if (g->disp3dcnt & 0x80) fog(g);
     if (g->disp3dcnt & 0x10) anti_alias(g);

@@ -7,7 +7,10 @@
  * GXSTAT shows its level and GX FIFO DMA pauses when it is half full. The CPU does not
  * stall when it writes to a full FIFO: the queue just takes G3D_FIFO_CAP entries, beyond
  * which commands are lost (counted in Gpu3d.dropped). */
+#include <stdlib.h>
+#include <string.h>
 #include "nds.h"
+#include "workers.h"
 
 /* parameters + 1 per command (GBATEK "DS 3D I/O Map"); 0: not a command, ignored */
 static const u8 np1[128] = {
@@ -643,5 +646,12 @@ void gpu3d_init(Nds *s) {
     for (int i = 0; i < 4; i++) g->strip[i].ram = -1;
 }
 
-int gpu3d_option(Nds *s, const char *name, const char *value) { (void)s; (void)name; (void)value; return 0; }
+/* --render-threads N: threads the rasterizer draws screen bands on, the caller's included (1: none). The
+ * frame is the same whatever N is. */
+int gpu3d_option(Nds *s, const char *name, const char *value) {
+    (void)s;
+    if (strcmp(name, "--render-threads")) return 0;
+    workers_set_threads(atoi(value));
+    return 1;
+}
 void gpu3d_shutdown(Nds *s) { (void)s; }

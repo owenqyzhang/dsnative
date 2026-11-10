@@ -543,13 +543,83 @@ stand-in gamepad.
 
 ### 4. Speed
 
-The DS is slow by modern standards, so correctness comes first. Then:
+Measure first. `tools/bench.py` runs `dsn_headless` several times from the same start (a fresh
+copy of the save, `--rtc` fixed) and reports emulated frames per second as the best frames of the
+runs, per window of frames, with the median, 99th-percentile and worst frame time against the
+16.72 ms a frame may take (59.8261 fps) and 4.18 ms at 4x real time. The machine may be shared
+with other work, so every frame takes the minimum over the runs and `--vs DIR` alternates the runs
+of two builds. `--profile A:B` samples the emulation thread (macOS: a helper thread suspends it
+every millisecond and reads pc, lr and the frame-pointer chain; a SIGPROF timer would be skewed
+towards system calls on XNU) and sorts the samples into the machine's parts. It samples only the
+emulation thread, so with render threads the rasterizer's share is the part the emulation thread
+ran or waited for; use `--render-threads 1` for an attribution. `--hash` makes `dsn_headless`
+print hashes of both screens, all memory, both CPUs' registers and cycle counts, and the audio at
+chosen frames: a change that must not alter the emulation leaves them equal, and `--expect FILE` /
+`--vs` check that. `--workload` runs the test ROM's CPU benchmark (`tests/hw/bench_kernels.h`:
+CRC, quicksort, recursion, matrix multiply, copies, a jump-table VM, hardware registers; started
+by holding START, checksums checked against a host build of the same source). `--sample` runs
+macOS's `sample` on a live run as a rough cross-check.
 
-- keep guest registers in host locals within a function (today every access goes through the
-  `Cpu` structure, and memory writes force reloads);
-- direct C calls for static BL targets, falling back to the dispatcher on a mismatched return;
-- flag liveness, to drop dead flag computations;
-- cycle counts per instruction class, for games that depend on timing.
+What the measurements said (Apple M6, 4 render threads, Pokémon Black 2 from a save copy with A
+pressed every 100 frames to frame 900): before the speed work the boot, logos and intro (frames
+0-600) cost 1.0 ms a frame and the 3D title scene and main menu (600-900) 2.3-2.5 ms, about 7x
+real time, worst frame 3.3 ms; the game's CPUs are almost idle there. In the title scene (one
+render thread) the 3D rasterizer is about 53% of the time, the 2D renderer 16%, the geometry
+engine 9%, recompiled ARM9/ARM7 code 6%, the dispatcher 2%, the memory slow path and I/O registers
+4%. So the work went into the renderers:
+
+- The 2D renderer takes the engines' VRAM block tables once a line (a mask and a load per access
+  instead of a call and a modulo per pixel), fetches one map entry and one tile row per 8 pixels,
+  walks a list of layers in drawing order and stops at the first opaque layer unless a blend can
+  use the one behind it, and paints lines that have no window, blend or semi-transparent sprite
+  back to front in plain vectorizable passes. No arithmetic changed.
+- The 3D rasterizer draws the frame as 12 bands of 16 rows on a small worker pool
+  (`runtime/workers.c`: one mutex, helpers started at the first run, the caller takes jobs too;
+  the default is the number of cores, at most 4; `--render-threads N`, 1 for none). A pixel depends
+  only on the polygons that cover it, in the same order whatever the rows around it, so the frame
+  is identical for any thread count (`tests/unit/test_threads.c`); edge marking, fog and
+  anti-aliasing still run over the whole frame after the join. Frames of fewer than 48 polygons
+  are drawn in the caller. `span()` does the depth test before the perspective factor and
+  attribute interpolation (58% of the pixels Black 2's title scene visits fail it). Helper threads
+  inherit the QoS class of the thread that first calls the rasterizer, so the app's emulation
+  thread decides it. The pool serves one emulation thread at a time: two machines drawing
+  concurrently in one process would share it.
+- The dispatcher reads the machine's IME, IE and IF in place (no call through a pointer at every
+  dispatch) and the cache line holds the function. The interrupt is taken at exactly the same
+  dispatches as before.
+
+Result: all 900 frames 1.418 -> 0.643 ms a frame (2.2x); the 3D title scene and menu 1.09-1.18 ms
+(14-15x real time; 1.56-1.98 ms, 9-11x, on one render thread), the rest 0.33-0.46 ms (36-50x);
+bit-identical output at every step. Checked again at the merge on a Black 2 session with the
+real save (title, menu, overworld, a 3D battle at frame 3700, hashes of screens, memory, CPU
+state and audio at seven frames): identical to the build before the optimizations with 1, 4 and
+the default number of render threads, and 8.9 s against 4.7 s of wall time for the 3700 frames.
+
+Not done, because the numbers do not justify it yet: guest registers in host locals, flag
+liveness, direct calls for static BL targets and inline memory access fast paths (the last is
+already inline: `rd32`/`wr32` are page-table lookups). A fully busy ARM9 (1,120,380 guest cycles a
+frame) costs 0.21-0.57 ms a frame including screen rendering on the CPU benchmark's kernels, at
+least 29x real time, and about 12% of Black 2's title-scene frame is guest code, dispatcher and
+slow paths together. Direct calls would also have to keep the interrupt check at each call (the
+dispatcher takes interrupts at every dispatch, and cycle counts must not move) and bound the host
+stack. The hardware-register kernel is the slowest (1.84 ms a frame at 100% busy, 9x real time):
+every I/O access goes through a chain of eight subsystem hooks (`sub_io_read`/`sub_io_write`); a
+range prefilter is the next thing to try there. The ARM9's cycle counts are still one per
+instruction, so cycle counts per instruction class remain for games that depend on timing.
+
+Build cost (the generated code is unchanged by this work): Black 2 recompiles in 39 s into 241 MB
+of C in 179 files; `make -j4` at -O2 takes about 100 s wall and 370-390 s of CPU (135 MB of
+objects, a 120 MB executable). The optimizer is the cost: a 0.9 MB generated file parses in 0.03
+s, compiles in 0.16 s at -O0 and in 1.1-1.2 s at -O1, -Os and -O2, so -O1 and -Os save nothing.
+-O0 builds the whole game in 15 s (49 s of CPU) and runs Black 2 at 3.35 ms a frame (2.9x real
+time in the 3D scenes), bit-identical: `make CFLAGS=-O0` is the development build. Compiling only
+the functions a game profile finds hot at -O2 and the rest at -O0 is the obvious next step for
+build time.
+
+Real time for the target: 59.8261 fps with margin; 4x on the Mac (4.18 ms a frame) is the goal
+for Black 2's title scene and menu. The baseline already met it on average (6.4-7.3x); the worst
+reachable frames were 3.3 ms and are now 1.7 ms with threads (2.6 ms on one thread). Nothing was
+run on a device.
 
 ### 5. 3DS
 

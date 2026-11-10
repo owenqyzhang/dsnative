@@ -114,4 +114,5 @@ void gpu2d_render_line(Nds *s, int engine, int line, u32 *out);
 /* Notes writes to the affine reference points; never claims an access (returns 0). */
 int gpu2d_io_write(Nds *s, int cpu, u32 off, int size, u32 v);
 u8 *vram_engine_ptr(Nds *s, int engine, int obj, u32 offset);    /* engine-relative VRAM */
+u8 *const *vram_engine_table(int engine, int obj, u32 *mask);    /* its 16 KB blocks, and the index mask */
 #endif

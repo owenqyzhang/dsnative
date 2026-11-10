@@ -14,6 +14,7 @@ void sound_test9(void) __attribute__((weak));
 void gpu3d_test9(void) __attribute__((weak));
 void bios_test9(void) __attribute__((weak));
 void capture_test9(void) __attribute__((weak));
+void bench_test9(void) __attribute__((weak));    /* only when START is held: tools/bench.py --workload */
 
 u32 arm7_command(u32 id, u32 arg) {
     REG_IPCFIFOSEND = 0x80000000u | (id << 24) | (arg & 0xFFFFFF);
@@ -220,6 +221,7 @@ int main(void) {
         }
         if (frame == 60) { dbg("sprite "); dbg_hex((u32)x); dbg(" "); dbg_hex((u32)y); dbg("\n"); dbg("DONE\n"); }
         if (frame == 61) {
+            if (bench_test9) bench_test9();
             if (rtc_test9) rtc_test9();
             if (save_test9) save_test9();
             if (sound_test9) sound_test9();

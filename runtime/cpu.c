@@ -553,7 +553,9 @@ u32 dsr_swi(Cpu *c, u32 num, u32 next) {
 
 /* ---- the dispatcher --------------------------------------------------------- */
 #define CACHE_BITS 16
-typedef struct { u32 key; const DispatchEntry *e; } CacheLine;
+/* fn is the entry's function (null: the line is empty); plain: nothing to compare memory with first */
+typedef struct { u32 key; u32 plain; GuestFn fn; const DispatchEntry *e; } CacheLine;
+#define CACHE_MASK ((1 << CACHE_BITS) - 1)
 static CacheLine cache9[1 << CACHE_BITS], cache7[1 << CACHE_BITS];
 
 void dsr_flush_cache(Cpu *c) {
@@ -567,9 +569,10 @@ static int entry_matches(Cpu *c, const DispatchEntry *e, u32 pc) {
 }
 
 static const DispatchEntry *lookup(Cpu *c, u32 key) {
-    CacheLine *cl = &(c->arch == 5 ? cache9 : cache7)[(key >> 1) & ((1 << CACHE_BITS) - 1)];
+    CacheLine *cl = &(c->arch == 5 ? cache9 : cache7)[(key >> 1) & CACHE_MASK];
     u32 pc = key & ~1u;
-    if (cl->e && cl->key == key && (!cl->e->check_len || entry_matches(c, cl->e, pc))) return cl->e;
+    if (cl->fn && cl->key == key && (cl->plain || entry_matches(c, cl->e, pc))) return cl->e;
+    c->lookups_slow++;
     u32 lo = 0, hi = c->table_len;
     while (lo < hi) {
         u32 mid = (lo + hi) / 2;
@@ -577,7 +580,7 @@ static const DispatchEntry *lookup(Cpu *c, u32 key) {
     }
     for (u32 i = lo; i < c->table_len && c->table[i].key == key; i++) {
         const DispatchEntry *e = &c->table[i];
-        if (!e->check_len || entry_matches(c, e, pc)) { cl->key = key; cl->e = e; return e; }
+        if (!e->check_len || entry_matches(c, e, pc)) { cl->key = key; cl->e = e; cl->fn = e->fn; cl->plain = !e->check_len; return e; }
     }
     return 0;
 }
@@ -615,7 +618,11 @@ static void enter_irq(Cpu *c) {
 
 /* BIOS code, run in C: the interrupt handler and its return */
 #define BIOS_IRQ_RET 0x200u
-static int irq_pending(Cpu *c) { return !c->irq_off && c->irq_line && c->irq_line(c); }
+static inline int irq_pending(Cpu *c) {
+    if (c->irq_off) return 0;
+    if (c->irq_ime) return (*c->irq_ime & 1) && (*c->irq_ie & *c->irq_if);     /* what irq_line computes, without the call */
+    return c->irq_line && c->irq_line(c);
+}
 
 static int bios_exec(Cpu *c) {
     u32 off = c->r[15] - c->bios_base;
@@ -693,7 +700,14 @@ s32 dsr_run(Cpu *c, s32 cycles) {
         u32 pc = c->r[15];
         if (pc == c->exit_pc) { c->stop = 1; break; }
         if (in_bios(c, pc)) { if (!bios_exec(c) && !c->halted) break; continue; }
-        const DispatchEntry *e = lookup(c, pc | c->t);
+        u32 key = pc | c->t;
+        CacheLine *cl = &(c->arch == 5 ? cache9 : cache7)[(key >> 1) & CACHE_MASK];
+        if (cl->key == key && cl->fn && cl->plain) {        /* the common case: a cached function that needs no check */
+            c->dispatches++;
+            c->r[15] = cl->fn(c, pc);
+            continue;
+        }
+        const DispatchEntry *e = lookup(c, key);
         if (!e) {
             const PicEntry *p = lookup_pic(c, pc);
             if (p) {

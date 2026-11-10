@@ -76,13 +76,20 @@ static int bank_region(Nds *s, int b, u32 *off) {
 static u8 *abg[32], *bbg[8], *aobj[16], *bobj[8];
 u8 *vram_texslot[4], *vram_texpal[8], *vram_extpal[4][4];    /* ext: [region][slot 8 KB] */
 
+/* The 16 KB block table of an engine's BG or OBJ VRAM and its index mask (the sizes are powers of
+ * two): the renderers look a block up once per tile or sprite row, not per pixel. */
+u8 *const *vram_engine_table(int engine, int obj, u32 *mask) {
+    if (engine == 0) { *mask = obj ? 15 : 31; return obj ? aobj : abg; }
+    *mask = 7;
+    return obj ? bobj : bbg;
+}
+
 u8 *vram_engine_ptr(Nds *s, int engine, int obj, u32 offset) {
     (void)s;
-    u8 **t; u32 n;
-    if (engine == 0) { t = obj ? aobj : abg; n = obj ? 16 : 32; }
-    else { t = obj ? bobj : bbg; n = 8; }
-    u32 blk = (offset >> 14) % n;
-    return t[blk] ? t[blk] + (offset & 0x3FFF) : 0;
+    u32 mask;
+    u8 *const *t = vram_engine_table(engine, obj, &mask);
+    u8 *b = t[(offset >> 14) & mask];
+    return b ? b + (offset & 0x3FFF) : 0;
 }
 
 static void map_pages(Cpu *c, u32 addr, u32 size, u8 *mem, int rw, int rw8) {
@@ -663,6 +670,7 @@ void nds_shutdown(Nds *s) {
 static u32 read_slow(Cpu *c, u32 a, int size) {
     Nds *s = SYS(c);
     int cpu = CPU_OF(c);
+    c->slow_reads++;
     switch (a >> 24) {
     case 0x04: {
         u32 off = a - 0x04000000u;
@@ -683,6 +691,7 @@ static u32 read_slow(Cpu *c, u32 a, int size) {
 static void write_slow(Cpu *c, u32 a, u32 v, int size) {
     Nds *s = SYS(c);
     int cpu = CPU_OF(c);
+    c->slow_writes++;
     switch (a >> 24) {
     case 0x04: {
         u32 off = a - 0x04000000u;
@@ -715,6 +724,7 @@ Nds *nds_create(const u8 *rom, u32 rom_size) {
         c->sys = s;
         c->read_slow = read_slow; c->write_slow = write_slow;
         c->irq_line = irq_line; c->irq_wake = irq_wake;
+        c->irq_ime = &s->ime[k]; c->irq_ie = &s->ie[k]; c->irq_if = &s->ifl[k];
         c->remap = remap_cb; c->log_miss = log_miss;
         dsr_flush_cache(c);
     }

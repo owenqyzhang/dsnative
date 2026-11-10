@@ -50,6 +50,7 @@ advantages of native execution:
 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG, noise), capture, mixer at 32768 Hz into a ring for the app, ARM7 BIOS sound calls | done; Pokémon Black 2's sound driver runs |
 | 3D engine: geometry engine (command FIFO and ports, GXSTAT, matrix stacks, lighting, clipping, box/position/vector tests, geometry FIFO DMA) and a software rasterizer (Z or W buffer, Gouraud, all seven texture formats, modulation/decal/toon/highlight/shadow polygons, alpha blending, fog, edge marking, an approximate anti-aliasing) feeding engine A's BG0 | done (no texture filtering, no exact anti-aliasing; the rasterizer is software) |
 | Other games | Pokémon Black, White, White 2, HeartGold and SoulSilver recompile, build and run headless: titles, a new game's first dialogue and name entry (HeartGold and SoulSilver need a touch on the first screens). Each reaches overlay code that is decrypted at run time, which the interpreter fallback runs | boot and the first minutes |
+| Speed | `tools/bench.py` measures frames per second and where the time goes (sampling profiler, dispatcher counters, a CPU benchmark in the test ROM, hashes of screens, memory, registers and audio that must not change); the 2D renderer, the 3D rasterizer (screen bands on worker threads) and the dispatcher are tuned: Pokémon Black 2 runs its intro, 3D title scene and main menu at 14-15x real time on an Apple M6 (9-11x on one render thread), the rest of the boot at 36-50x | done for what Black 2 reaches; the generated code is unchanged (a fully busy ARM9 is already 29x real time or better) |
 | Apple app shell: Swift package with Metal screens, controllers, touch and pad, audio, saves; macOS, iOS/iPadOS and tvOS apps build from a ROM with `tools/build_app.py` and run in the simulators | done for the homebrew test ROM (no commercial game built into it yet; nothing run on a physical device) |
 
 ## Try it
@@ -104,7 +105,13 @@ Headless options: `--keys 100:a,105:` presses A at frame 100 and releases it at 
 `a b x y l r s e` for A, B, X, Y, L, R, Start and Select; `U D W E` for up, down, left and
 right), `--touch F:X:Y`, `--save PATH` keeps the save memory in a file (with `--save-type TYPE`
 when the game isn't in the built-in table of save chips: see the note the runtime prints), and
-`--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run. Pokémon HeartGold and
+`--rtc YYYY-MM-DDTHH:MM:SS` fixes the clock for a reproducible run, `--render-threads N` sets the
+3D rasterizer's threads (1: none; the frame is the same for any N), and `--hash F,F,...` prints
+hashes of the screens, memory, CPU state and audio at those frames, to check that a change leaves
+the emulation as it was. `python3 tools/bench.py --rom game.nds --save game.sav --press a:100
+--frames 900 --build --profile 700:900` benchmarks and profiles a game (macOS); `--vs DIR`
+compares two builds. `make CFLAGS=-O0` in the build directory is a development build that
+compiles about 7x faster. Pokémon HeartGold and
 SoulSilver need a touch to get past the first notice screens: `--touch 800:128:153,808:-1:0`.
 
 `python3 tools/build_app.py game.nds -o build/app --platform macos` builds a Mac app with your game
@@ -137,7 +144,9 @@ the road to commercial games, an Apple app and the 3DS.
 | `tools/build_app.py` | ROM to Mac, iOS or tvOS app (recompile, `libdsn.a` per SDK, XcodeGen, xcodebuild) |
 | `app/` | the Apple app: DSNKit (shared), DSNCore (C shim), the Mac, iPhone/iPad and Apple TV apps; see [app/README.md](app/README.md) |
 | `recomp/` | the recompiler (`python3 -m recomp`) |
-| `runtime/` | the C runtime: CPU and dispatcher (`cpu.c`), the DS (`nds.c`), 2D (`gpu2d.c`), headless driver |
+| `runtime/` | the C runtime: CPU and dispatcher (`cpu.c`), the DS (`nds.c`), 2D (`gpu2d.c`), 3D, sound and the other subsystems, helper threads (`workers.c`), headless driver |
+| `tools/bench.py`, `tests/hw/bench_*` | benchmark and profiler; the CPU benchmark in the test ROM |
+| `tools/random_keys.py`, `tools/b2_script.py` | seeded `--keys` scripts for headless play-tests |
 | `tests/difftest.py` | differential test against Unicorn |
 | `tests/test_discovery.py` | code discovery cases the test ROM only hits with some layouts |
 | `tests/test_rom.py` | the ROM reader: module parameters and autoload lists of each SDK layout |

@@ -55,6 +55,8 @@ struct Cpu {
     u32 pic_len;
     /* statistics */
     u64 dispatches, misses;
+    u64 lookups_slow;           /* dispatches the direct-mapped cache did not answer */
+    u64 slow_reads, slow_writes;    /* accesses that took the slow path (I/O, palettes, OAM, unmapped) */
     u32 last_miss;
     u32 exit_pc;                /* the dispatcher stops when it reaches this address (tests) */
     u32 stop;
@@ -63,6 +65,7 @@ struct Cpu {
     /* the machine's interrupt lines */
     int (*irq_line)(Cpu *c);    /* an enabled interrupt is requested (IME, IE & IF) */
     int (*irq_wake)(Cpu *c);    /* IE & IF: wakes a halted CPU */
+    const u32 *irq_ime, *irq_ie, *irq_if;   /* the machine's IME, IE and IF, read in place: the dispatcher asks at every dispatch */
     void (*remap)(Cpu *c);      /* TCM settings changed */
     void (*log_miss)(Cpu *c, u32 pc, u32 thumb);
     u32 irq_check_addr;         /* where the BIOS IntrWait flags live */

@@ -15,6 +15,9 @@
     hardware results, screens in `build/hwtest/screen.png`).
   - `python3 tests/test_units.py`: C unit tests of the runtime (`tests/unit/test_*.c`);
     `DSN_SANITIZE=1` builds them under ASan and UBSan.
+    A change to the 3D rasterizer's per-pixel path or the 2D renderer needs `python3 tools/bench.py --vs DIR`
+    against the previous build (the hashes must be equal; `tests/unit/test_threads.c` checks the
+    thread counts).
   - `python3 tests/test_interp.py` after a change to `runtime/interp.c` or the miss path in `cpu.c`;
     `difftest.py` also runs every snippet interpreted and mixed, so interpreter semantics must follow
     `recomp/isa.py`.

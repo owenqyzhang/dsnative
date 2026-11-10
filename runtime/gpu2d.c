@@ -22,13 +22,25 @@ typedef struct { u16 px[SCREEN_W]; } Layer;
 
 static u16 pal16(Nds *s, int engine, u32 index) { return rd16v(&s->pal[engine * 0x400 + (index & 0x1FF) * 2]); }
 
-static u8 vbyte(Nds *s, int engine, int obj, u32 off) {
-    u8 *p = vram_engine_ptr(s, engine, obj, off);
+/* The engines' 16 KB VRAM block tables (nds.c), taken once a line: a lookup is then a mask and a load,
+ * not a call. A block no bank maps reads as zero. */
+static u8 *const *vtab[2][2];
+static u32 vmask[2][2];
+
+static inline u8 *vptr(int engine, int obj, u32 off) {
+    u8 *b = vtab[engine][obj][(off >> 14) & vmask[engine][obj]];
+    return b ? b + (off & 0x3FFF) : 0;
+}
+
+static inline u8 vbyte(Nds *s, int engine, int obj, u32 off) {
+    (void)s;
+    u8 *p = vptr(engine, obj, off);
     return p ? *p : 0;
 }
 
-static u16 vhalf(Nds *s, int engine, int obj, u32 off) {
-    u8 *p = vram_engine_ptr(s, engine, obj, off);
+static inline u16 vhalf(Nds *s, int engine, int obj, u32 off) {
+    (void)s;
+    u8 *p = vptr(engine, obj, off);
     return p ? rd16v(p) : 0;
 }
 
@@ -50,6 +62,8 @@ static void bg0_3d(Nds *s, const u8 *io, int line, Layer *L, u8 *alpha) {
     }
 }
 
+/* One map entry and one row of the tile it names per 8 pixels, not per pixel. The row (8 bytes at 256
+ * colours, 4 at 16) is aligned and so never leaves its 16 KB block. */
 static void text_bg(Nds *s, int engine, const u8 *io, u32 dispcnt, int bg, int line, Layer *L) {
     u16 cnt = rd16v(io + 8 + 2 * bg);
     u32 hofs = rd16v(io + 0x10 + 4 * bg) & 0x1FF, vofs = rd16v(io + 0x12 + 4 * bg) & 0x1FF;
@@ -60,27 +74,39 @@ static void text_bg(Nds *s, int engine, const u8 *io, u32 dispcnt, int bg, int l
     int extslot = bg < 2 && (cnt & 0x2000) ? bg + 2 : bg;
     int ext = (dispcnt >> 30) & 1;
     u32 py = ((u32)line + vofs) & hmask;
-    for (int x = 0; x < SCREEN_W; x++) {
-        u32 px = ((u32)x + hofs) & wmask;
-        u32 blk = (px >> 8) + ((py >> 8) * ((size & 1) ? 2 : 1));
-        u32 eoff = scrbase + blk * 0x800 + ((py & 255) >> 3) * 64 + ((px & 255) >> 3) * 2;
+    u32 map_row = scrbase + ((py & 255) >> 3) * 64, map_blk_row = (py >> 8) * ((size & 1) ? 2 : 1);
+    const u8 *palp = s->pal + engine * 0x400;
+    for (u32 x = 0; x < SCREEN_W;) {
+        u32 px = (x + hofs) & wmask;
+        u32 eoff = map_row + ((px >> 8) + map_blk_row) * 0x800 + ((px & 255) >> 3) * 2;
         u16 e = vhalf(s, engine, 0, eoff);
-        u32 tx = px & 7, ty = py & 7;
-        if (e & 0x400) tx = 7 - tx;
+        u32 ty = py & 7, t0 = px & 7, tile = e & 0x3FF;
         if (e & 0x800) ty = 7 - ty;
-        u32 tile = e & 0x3FF;
-        u16 col;
+        u32 n = 8 - t0;
+        if (x + n > SCREEN_W) n = SCREEN_W - x;
+        int hf = (e & 0x400) != 0;
         if (bpp8) {
-            u8 idx = vbyte(s, engine, 0, charbase + tile * 64 + ty * 8 + tx);
-            if (!idx) { L->px[x] = 0; continue; }
-            col = ext ? ext_color(engine ? 2 : 0, extslot, (u32)(e >> 12) * 256 + idx) : pal16(s, engine, idx);
+            const u8 *row = vptr(engine, 0, charbase + tile * 64 + ty * 8);
+            for (u32 k = 0; k < n; k++) {
+                u32 tx = hf ? 7 - (t0 + k) : t0 + k;
+                u8 idx = row ? row[tx] : 0;
+                if (!idx) { L->px[x + k] = 0; continue; }
+                u16 col = ext ? ext_color(engine ? 2 : 0, extslot, (u32)(e >> 12) * 256 + idx) : rd16v(palp + ((u32)idx & 0x1FF) * 2);
+                L->px[x + k] = col | 0x8000;
+            }
         } else {
-            u8 b = vbyte(s, engine, 0, charbase + tile * 32 + ty * 4 + tx / 2);
-            u8 idx = (tx & 1) ? b >> 4 : b & 15;
-            if (!idx) { L->px[x] = 0; continue; }
-            col = pal16(s, engine, (u32)(e >> 12) * 16 + idx);
+            const u8 *row = vptr(engine, 0, charbase + tile * 32 + ty * 4);
+            const u8 *pal = palp + (((u32)(e >> 12) * 16) & 0x1FF) * 2;
+            for (u32 k = 0; k < n; k++) {
+                u32 tx = hf ? 7 - (t0 + k) : t0 + k;
+                u8 b = row ? row[tx >> 1] : 0;
+                u8 idx = (tx & 1) ? b >> 4 : b & 15;
+                if (!idx) { L->px[x + k] = 0; continue; }
+                /* the palette index is (palette * 16 + idx) & 0x1FF; palette * 16 is a multiple of 16, so adding idx never carries */
+                L->px[x + k] = rd16v(pal + (u32)idx * 2) | 0x8000;
+            }
         }
-        L->px[x] = col | 0x8000;
+        x += n;
     }
 }
 
@@ -200,14 +226,17 @@ typedef struct {
     u8 win[SCREEN_W];           /* inside the OBJ window */
 } ObjLine;
 
-static void objects(Nds *s, int engine, const u8 *io, u32 dispcnt, int line, ObjLine *o) {
+/* Returns whether any sprite pixel is semi-transparent (blends with what is behind it). */
+static int objects(Nds *s, int engine, const u8 *io, u32 dispcnt, int line, ObjLine *o) {
     const u8 *oam = s->oam + engine * 0x400;
     int map1d = (dispcnt >> 4) & 1;
     u32 bound = 32u << ((dispcnt >> 20) & 3);
     int ext = (dispcnt >> 31) & 1;
     u16 mos = rd16v(io + 0x4C);
     u32 omh = ((mos >> 8) & 15) + 1u, omv = ((mos >> 12) & 15) + 1u;
-    for (int x = 0; x < SCREEN_W; x++) { o->col[x] = 0; o->prio[x] = 4; o->semi[x] = 0; o->eva[x] = 0; o->win[x] = 0; }
+    int any_semi = 0;
+    memset(o->col, 0, sizeof o->col); memset(o->prio, 4, sizeof o->prio); memset(o->semi, 0, sizeof o->semi);
+    memset(o->eva, 0, sizeof o->eva); memset(o->win, 0, sizeof o->win);
     for (int i = 127; i >= 0; i--) {
         u16 a0 = rd16v(oam + i * 8), a1 = rd16v(oam + i * 8 + 2), a2 = rd16v(oam + i * 8 + 4);
         int affine = (a0 >> 8) & 1;
@@ -283,9 +312,11 @@ static void objects(Nds *s, int engine, const u8 *io, u32 dispcnt, int line, Obj
             if (mode == 2) { o->win[px] = 1; continue; }    /* its colour and priority don't matter */
             if ((int)pr <= o->prio[px]) {
                 o->col[px] = c | 0x8000; o->prio[px] = (u8)pr; o->semi[px] = (u8)semi; o->eva[px] = (u8)eva;
+                any_semi |= semi;
             }
         }
     }
+    return any_semi;
 }
 
 static u16 blend_alpha(u16 a, u16 b, u32 eva, u32 evb) {
@@ -341,8 +372,8 @@ static void compose_line(Nds *s, int engine, int line, u16 *line_px) {
         en[i] = 1;
     }
     ObjLine obj;
-    int objon = (dispcnt >> 12) & 1;
-    if (objon) objects(s, engine, io, dispcnt, line, &obj);
+    int objon = (dispcnt >> 12) & 1, any_semi = 0;
+    if (objon) any_semi = objects(s, engine, io, dispcnt, line, &obj);
     /* windows: per pixel, which layers (bits 0-3 BG, 4 OBJ) and whether effects (5) are on there */
     u8 wmask[SCREEN_W];
     u32 winen = (dispcnt >> 13) & 7;
@@ -370,18 +401,45 @@ static void compose_line(Nds *s, int engine, int line, u16 *line_px) {
     if (eva > 16) eva = 16; if (evb > 16) evb = 16; if (ey > 16) ey = 16;
     int effect = (bldcnt >> 6) & 3;
     u16 backdrop = pal16(s, engine, 0);
+    /* the layers front to back: for each priority the sprites, then the backgrounds by number */
+    int seq_id[8], seq_pr[8], nseq = 0;        /* up to four BGs, and a sprite entry for each priority */
+    for (int pr = 0; pr < 4; pr++) {
+        if (objon) { seq_id[nseq] = 4; seq_pr[nseq++] = pr; }
+        for (int i = 0; i < 4; i++) if (en[i] && bgprio[i] == pr) { seq_id[nseq] = i; seq_pr[nseq++] = pr; }
+    }
+    /* the layer behind the first is only looked at when a blend can use it */
+    int need2 = effect == 1 || any_semi;
+    if (!winen && effect == 0 && !any_semi) {
+        /* nothing but the front-most opaque layer shows: paint the layers back to front, a plain pass each */
+        for (int x = 0; x < SCREEN_W; x++) line_px[x] = backdrop & 0x7FFF;
+        for (int k = nseq - 1; k >= 0; k--) {
+            int id = seq_id[k];
+            if (id == 4) {
+                u8 pr = (u8)seq_pr[k];
+                for (int x = 0; x < SCREEN_W; x++) if ((obj.col[x] & 0x8000) && obj.prio[x] == pr) line_px[x] = obj.col[x] & 0x7FFF;
+            } else {
+                const u16 *px = bgs[id].px;
+                for (int x = 0; x < SCREEN_W; x++) if (px[x] & 0x8000) line_px[x] = px[x] & 0x7FFF;
+            }
+        }
+        return;
+    }
     for (int x = 0; x < SCREEN_W; x++) {
         u8 m = wmask[x];
         /* the two front-most layers: id 0-3 BG, 4 OBJ, 5 backdrop */
         int id1 = 5, id2 = 5; u16 c1 = backdrop, c2 = backdrop;
-        for (int pr = 0; pr < 4; pr++) {
-            if (objon && (m & 0x10) && (obj.col[x] & 0x8000) && obj.prio[x] == pr) {
-                if (id1 == 5) { id1 = 4; c1 = obj.col[x]; } else if (id2 == 5) { id2 = 4; c2 = obj.col[x]; }
+        for (int k = 0; k < nseq; k++) {
+            int id = seq_id[k];
+            u16 col;
+            if (id == 4) {
+                if (!((m & 0x10) && (obj.col[x] & 0x8000) && obj.prio[x] == seq_pr[k])) continue;
+                col = obj.col[x];
+            } else {
+                if (!((m >> id) & 1) || !(bgs[id].px[x] & 0x8000)) continue;
+                col = bgs[id].px[x];
             }
-            for (int i = 0; i < 4; i++) {
-                if (!en[i] || !((m >> i) & 1) || bgprio[i] != pr || !(bgs[i].px[x] & 0x8000)) continue;
-                if (id1 == 5) { id1 = i; c1 = bgs[i].px[x]; } else if (id2 == 5) { id2 = i; c2 = bgs[i].px[x]; }
-            }
+            if (id1 == 5) { id1 = id; c1 = col; if (!need2) break; }
+            else { id2 = id; c2 = col; break; }
         }
         u16 c = c1 & 0x7FFF;
         if (m & 0x20) {                         /* effects are on in this window region */
@@ -402,6 +460,7 @@ static void compose_line(Nds *s, int engine, int line, u16 *line_px) {
 }
 
 void gpu2d_render_line(Nds *s, int engine, int line, u32 *out) {
+    for (int e = 0; e < 2; e++) for (int o = 0; o < 2; o++) vtab[e][o] = vram_engine_table(e, o, &vmask[e][o]);
     ref_sync(s, engine, line);
     const u8 *io = s->io[0] + (engine ? 0x1000 : 0);
     u32 dispcnt; memcpy(&dispcnt, io, 4);
@@ -427,9 +486,9 @@ void gpu2d_render_line(Nds *s, int engine, int line, u32 *out) {
     if (cap) capture_line(s, line, gfx, fifo, dmode == 2);     /* after the display has read its VRAM line */
     u16 mb = rd16v(io + 0x6C);
     int mmode = mb >> 14; u32 mf = mb & 31; if (mf > 16) mf = 16;
-    for (int x = 0; x < SCREEN_W; x++) {
-        u16 c = line_px[x];
-        if (mmode == 1) c = brighten(c, mf, 1); else if (mmode == 2) c = brighten(c, mf, 0);
-        out[x] = bgr555(c);
+    if (mmode == 1 || mmode == 2) {
+        for (int x = 0; x < SCREEN_W; x++) out[x] = bgr555(brighten(line_px[x], mf, mmode == 1));
+    } else {
+        for (int x = 0; x < SCREEN_W; x++) out[x] = bgr555(line_px[x]);
     }
 }
